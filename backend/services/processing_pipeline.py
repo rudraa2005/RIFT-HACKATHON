@@ -81,7 +81,7 @@ from app.config import ML_ENABLED, ML_MODEL_PATH
 logger = logging.getLogger(__name__)
 
 # Maximum transactions to process (performance requirement: ≤ 30s)
-MAX_TRANSACTIONS = 10_000
+MAX_TRANSACTIONS = 5_000
 
 
 class ProcessingService:

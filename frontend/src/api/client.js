@@ -47,4 +47,3 @@ export async function fetchHistoryReport(runId) {
   const res = await fetch(`${API_BASE_URL}/history/${encodeURIComponent(runId)}`)
   return handleResponse(res)
 }
-
