@@ -458,16 +458,17 @@ class ProcessingService:
             all_ring_members.update(ring["members"])
 
         # 2. Apply structural bonuses for better ranking resolution
-        # Hierarchy: AGG > MULE > SMURF Sender
+        # Hierarchy: SMURF AGG > CYCLE > SHELL
         for acct in normalized:
             acc_patterns = set(normalized[acct].get("patterns", []))
             bonus = 0.0
-            if "smurfing_aggregator" in acc_patterns: bonus += 25.0
-            if "cycle" in acc_patterns: bonus += 15.0
-            if "shell_account" in acc_patterns: bonus += 15.0
-            if "smurfing_disperser" in acc_patterns: bonus += 15.0
+            if "smurfing_aggregator" in acc_patterns: bonus += 40.0
+            if "cycle" in acc_patterns: bonus += 35.0
+            if "smurfing_disperser" in acc_patterns: bonus += 20.0
+            if "shell_account" in acc_patterns: bonus += 10.0
             if "fan_in_participant" in acc_patterns: bonus += 5.0
-            if "deep_layered_cascade" in acc_patterns: bonus += 5.0
+            if "fan_out_participant" in acc_patterns: bonus += 5.0
+            if "deep_layered_cascade" in acc_patterns: bonus += 10.0
             
             normalized[acct]["score"] += bonus
 
@@ -626,16 +627,25 @@ class ProcessingService:
             idx = 0
             for i, aid in enumerate(acct_ids):
                 if nonzero_mask[i]:
-                    new_score = round(float(scaled_scores[idx]), 2)
+                    new_score = float(scaled_scores[idx])
                     
-                    # ADAPTIVE RISK FLOOR FOR RING MEMBERS (Min 35% of ring risk)
+                    # 4. TOP-END COMPRESSION: Prevent broad 99.x saturation
+                    if new_score > 95.0:
+                        new_score = 95.0 + (new_score - 95.0) * 0.2
+                    
+                    # 5. PROPORTIONAL RISK INJECTION: Replace fixed floor clustering
+                    # Uses ring risk to inject a proportional baseline rather than a hard wall.
                     if aid in all_ring_members:
-                        ring_baseline = account_ring_risk.get(aid, 0) * 0.35
-                        new_score = max(new_score, ring_baseline)
+                        r_risk = account_ring_risk.get(aid, 0)
+                        # Inject 20% of ring risk as a baseline buffer (+ small jitter)
+                        proportional_boost = r_risk * 0.2
+                        jitter = (hash(aid) % 100) / 50.0 # 0 to 2 points of jitter
+                        new_score = max(new_score, proportional_boost + jitter)
                         
-                    normalized[aid]["score"] = new_score
+                    final_score = round(float(new_score), 2)
+                    normalized[aid]["score"] = final_score
                     # Also sync final_risk_score so format_output picks it up
-                    normalized[aid]["final_risk_score"] = round(new_score / 100.0, 4)
+                    normalized[aid]["final_risk_score"] = round(final_score / 100.0, 4)
                     idx += 1
                 else:
                     normalized[aid]["score"] = 0.0
