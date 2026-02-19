@@ -37,22 +37,51 @@ def enhance_ring_risk(
     high_velocity: Set[str],
 ) -> float:
     """
-    Enhanced ring risk = avg(member_scores) + (density × 20) + velocity_multiplier.
+    Enhanced ring risk = 
+    (Structural Strength × 0.4) + 
+    (Velocity Score × 0.2) + 
+    (Retention Score × 0.2) + 
+    (Temporal Density × 0.2)
     """
     members = ring["members"]
     if not members:
-        return ring.get("risk_score", 0)
+        return float(ring.get("risk_score", 0))
 
-    member_scores = [scores.get(m, {}).get("score", 0) for m in members]
-    avg_score = sum(member_scores) / len(member_scores)
-
-    density_component = density * 20
-
+    # 1. Structural Strength (Base risk from detection)
+    base_structural = float(ring.get("risk_score", 50))
+    
+    # 2. Velocity Score (Percentage of members with high velocity)
     velocity_count = sum(1 for m in members if m in high_velocity)
-    velocity_multiplier = 10 if velocity_count >= len(members) * 0.5 else 0
+    velocity_score = (velocity_count / len(members)) * 100
+    
+    # 3. Retention Score (Percentage of members with low retention)
+    # Check both specific flags and general low_retention pattern
+    retention_count = 0
+    for m in members:
+        patterns = scores.get(m, {}).get("patterns", [])
+        if any(p in patterns for p in ["low_retention_pass_through", "rapid_pass_through", "flow_chain_member"]):
+            retention_count += 1
+    retention_score = (retention_count / len(members)) * 100
+    
+    # 4. Temporal Density (Scaled to 100)
+    density_score = density * 100
 
-    risk = max(float(ring.get("risk_score", 0)), avg_score + density_component + velocity_multiplier)
-    return round(min(100, risk), 2)
+    # 5. Network Influence (Proxy for Centrality Dispersion)
+    # Average degree in the subgraph relative to the whole graph
+    subgraph_G = G.subgraph(members)
+    avg_sub_degree = sum(dict(subgraph_G.degree()).values()) / len(members) if members else 0
+    centrality_score = min(100, avg_sub_degree * 20)
+
+    risk = (
+        (base_structural * 0.45) +
+        (velocity_score * 0.15) +
+        (retention_score * 0.15) +
+        (density_score * 0.15) +
+        (centrality_score * 0.1)
+    )
+    
+    # Return as float for internal differentiation, rounded at JSON export
+    return float(min(100, risk))
 
 
 def finalize_ring_risks(

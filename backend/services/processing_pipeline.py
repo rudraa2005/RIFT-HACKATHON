@@ -595,25 +595,43 @@ class ProcessingService:
         nonzero_mask = raw_vals > 0
         nonzero_mask = raw_vals > 0
         if np.any(nonzero_mask):
-            # Using 'ordinal' method ensures meaningful differentiation 
-            # even for accounts with identical structural roles, 
-            # while the earlier bonus phase ensures AGG > MULE separation.
+            # 1. Ordinal ranking for stable differentiation
             ranks = rankdata(raw_vals[nonzero_mask], method='ordinal')
             num_suspicious = len(ranks)
-            percentiles = ranks / num_suspicious
+            percentiles = (ranks - 0.5) / num_suspicious  # Center percentiles
             
-            # Moderate non-linear spread (x^2.0) for better differentiation
-            final_percentiles = np.power(percentiles, 2.0) 
+            # 2. Sigmoid scaling to push mid-tier accounts away from clustering
+            # k=10 provides strong separation while keeping 0 and 1 boundaries reasonable
+            k = 10.0
+            sigmoid_percentiles = 1 / (1 + np.exp(-k * (percentiles - 0.5)))
+            
+            # 3. Min-Max scale the sigmoid back to [0, 1] to ensure range integrity
+            s_min = sigmoid_percentiles.min()
+            s_max = sigmoid_percentiles.max()
+            if s_max > s_min:
+                final_percentiles = (sigmoid_percentiles - s_min) / (s_max - s_min)
+            else:
+                final_percentiles = sigmoid_percentiles
+            
             scaled_scores = final_percentiles * 100.0
             
+            # Index of ring memberships for adaptive floor
+            account_ring_risk = {}
+            for ring in all_rings:
+                r_risk = float(ring.get("risk_score", 0))
+                for member in ring["members"]:
+                    m_str = str(member)
+                    account_ring_risk[m_str] = max(account_ring_risk.get(m_str, 0), r_risk)
+
             idx = 0
             for i, aid in enumerate(acct_ids):
                 if nonzero_mask[i]:
                     new_score = round(float(scaled_scores[idx]), 2)
                     
-                    # ENFORCE RISK FLOOR FOR RING MEMBERS (Min 35.0)
+                    # ADAPTIVE RISK FLOOR FOR RING MEMBERS (Min 35% of ring risk)
                     if aid in all_ring_members:
-                        new_score = max(new_score, 35.0)
+                        ring_baseline = account_ring_risk.get(aid, 0) * 0.35
+                        new_score = max(new_score, ring_baseline)
                         
                     normalized[aid]["score"] = new_score
                     # Also sync final_risk_score so format_output picks it up
