@@ -1,4 +1,11 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const getBaseUrl = () => {
+  let url = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+  if (!url.startsWith('http')) {
+    url = `https://${url}`
+  }
+  return url
+}
+const API_BASE_URL = getBaseUrl()
 
 async function handleResponse(res) {
   if (!res.ok) {
