@@ -58,6 +58,8 @@ _PATTERN_NAME_MAP = {
 
 def _map_pattern_name(internal_name: str) -> str:
     """Map an internal pattern name to the competition-required name."""
+    if internal_name.startswith("cycle_length_"):
+        return internal_name  # Already in correct format
     return _PATTERN_NAME_MAP.get(internal_name, internal_name)
 
 
@@ -72,25 +74,22 @@ def format_output(
 
     suspicious_accounts: List[Dict[str, Any]] = []
     for account_id, data in scores.items():
-        # Filter out accounts with very low scores (likely false positives)
-        if data["score"] <= 5.0:  # Only include accounts with meaningful risk
+        # Only include accounts with meaningful risk
+        if data["score"] <= 5.0:
             continue
 
-        detected_patterns = [
+        detected_patterns = list(dict.fromkeys(
             _map_pattern_name(p) for p in data["patterns"] if p not in _INTERNAL_PATTERNS
-        ]
-        # Also filter if only internal patterns (merchant/payroll) remain
-        if not detected_patterns or all(p in _INTERNAL_PATTERNS for p in data["patterns"]):
+        ))
+        
+        if not detected_patterns:
             continue
 
-        # Use hybrid final_risk_score (0-1) scaled to 0-100 if available,
-        # otherwise fall back to the raw rule-based score.
         if "final_risk_score" in data:
             display_score = round(float(data["final_risk_score"]) * 100, 2)
         else:
             display_score = round(float(data["score"]), 2)
 
-        # Clamp to [0, 100]
         display_score = max(0.0, min(100.0, display_score))
 
         suspicious_accounts.append(
@@ -99,15 +98,12 @@ def format_output(
                 "suspicion_score": display_score,
                 "detected_patterns": detected_patterns,
                 "ring_id": account_ring_map.get(account_id, "RING_NONE"),
-                "risk_timeline": data.get("timeline", []),
-                "score_breakdown": data.get("breakdown", {}),
             }
         )
 
     suspicious_accounts.sort(key=lambda x: x["suspicion_score"], reverse=True)
 
     fraud_rings: List[Dict[str, Any]] = []
-    # Map pattern types to user-friendly names
     pattern_type_map = {
         "smurfing_fan_in": "fan_in",
         "smurfing_fan_out": "fan_out",
@@ -117,8 +113,9 @@ def format_output(
     
     for ring in all_rings:
         pattern_type = ring.get("pattern_type", "unknown")
-        # Normalize pattern type
-        if pattern_type in pattern_type_map:
+        if pattern_type.startswith("cycle_length_"):
+            pattern_type = "cycle"
+        elif pattern_type in pattern_type_map:
             pattern_type = pattern_type_map[pattern_type]
         elif pattern_type.startswith("smurfing"):
             pattern_type = "fan_in" if "fan_in" in pattern_type else "fan_out"
@@ -129,8 +126,6 @@ def format_output(
             "pattern_type": pattern_type,
             "risk_score": round(float(ring["risk_score"]), 2),
         }
-        if "density_score" in ring:
-            ring_obj["density_score"] = round(float(ring["density_score"]), 2)
         fraud_rings.append(ring_obj)
 
     fraud_rings.sort(key=lambda x: x["risk_score"], reverse=True)
@@ -148,7 +143,14 @@ def format_output(
         "summary": summary,
     }
 
+    # For UI use: add graph_data and detailed fields only if requested or as extra
     if graph_data:
         result["graph_data"] = graph_data
+        # Add back breakdown for the UI popups
+        for acc in suspicious_accounts:
+            acc_id = acc["account_id"]
+            if acc_id in scores:
+                acc["risk_timeline"] = scores[acc_id].get("timeline", [])
+                acc["score_breakdown"] = scores[acc_id].get("breakdown", {})
 
     return result

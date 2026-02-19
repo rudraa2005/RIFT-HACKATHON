@@ -1,0 +1,153 @@
+{
+    "suspicious_accounts": [
+        {
+            "account_id": "AGG_3",
+            "suspicion_score": 96.2,
+            "detected_patterns": [
+                "fan_in_10",
+                "high_velocity"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "MULE_A_3",
+            "suspicion_score": 92.2,
+            "detected_patterns": [
+                "cycle_length_3"
+            ],
+            "ring_id": "RING_CYCLE_3"
+        },
+        {
+            "account_id": "MULE_B_3",
+            "suspicion_score": 91.0,
+            "detected_patterns": [
+                "cycle_length_3"
+            ],
+            "ring_id": "RING_CYCLE_3"
+        },
+        {
+            "account_id": "MULE_C_3",
+            "suspicion_score": 83.0,
+            "detected_patterns": [
+                "cycle_length_3"
+            ],
+            "ring_id": "RING_CYCLE_3"
+        },
+        {
+            "account_id": "SMURF_3_1",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "SMURF_3_2",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "SMURF_3_3",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "SMURF_3_4",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "SMURF_3_5",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "SMURF_3_6",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "SMURF_3_7",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "SMURF_3_8",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "SMURF_3_9",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        },
+        {
+            "account_id": "SMURF_3_10",
+            "suspicion_score": 72.4,
+            "detected_patterns": [
+                "structured_amount"
+            ],
+            "ring_id": "RING_SMURF_3"
+        }
+    ],
+    "fraud_rings": [
+        {
+            "ring_id": "RING_CYCLE_3",
+            "member_accounts": [
+                "MULE_A_3",
+                "MULE_B_3",
+                "MULE_C_3"
+            ],
+            "pattern_type": "cycle",
+            "risk_score": 92.5
+        },
+        {
+            "ring_id": "RING_SMURF_3",
+            "member_accounts": [
+                "SMURF_3_1",
+                "SMURF_3_2",
+                "SMURF_3_3",
+                "SMURF_3_4",
+                "SMURF_3_5",
+                "SMURF_3_6",
+                "SMURF_3_7",
+                "SMURF_3_8",
+                "SMURF_3_9",
+                "SMURF_3_10",
+                "AGG_3"
+            ],
+            "pattern_type": "fan_in",
+            "risk_score": 94.3
+        }
+    ],
+    "summary": {
+        "total_accounts_analyzed": 21,
+        "suspicious_accounts_flagged": 14,
+        "fraud_rings_detected": 2,
+        "processing_time_seconds": 2.4
+    }
+}

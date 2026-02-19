@@ -179,10 +179,37 @@ export default function Home() {
                   </p>
                 )}
                 {analysis && !error && !isUploading && (
-                  <p className="text-xs text-neutral-400 font-body">
-                    Last run: {analysis.summary?.suspicious_accounts_flagged ?? 0} suspicious accounts,{' '}
-                    {analysis.summary?.fraud_rings_detected ?? 0} rings detected.
-                  </p>
+                  <div className="flex flex-col items-center gap-4">
+                    <p className="text-xs text-neutral-400 font-body">
+                      Last run: {analysis.summary?.suspicious_accounts_flagged ?? 0} suspicious accounts,{' '}
+                      {analysis.summary?.fraud_rings_detected ?? 0} rings detected.
+                    </p>
+                    <button
+                      onClick={() => {
+                        const { graph_data, ...cleanData } = analysis;
+                        const finalData = {
+                          ...cleanData,
+                          suspicious_accounts: cleanData.suspicious_accounts.map(({ account_id, suspicion_score, detected_patterns, ring_id }) => ({
+                            account_id,
+                            suspicion_score,
+                            detected_patterns,
+                            ring_id
+                          }))
+                        };
+                        const blob = new Blob([JSON.stringify(finalData, null, 2)], { type: 'application/json' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `fraud_detection_${new Date().toISOString().split('T')[0]}.json`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                      }}
+                      className="inline-flex items-center gap-2 px-6 py-2 rounded-full text-xs font-semibold bg-white/5 border border-white/10 text-white hover:bg-white/10 transition-colors"
+                    >
+                      <span className="material-symbols-outlined text-sm">download</span>
+                      Download Results (JSON)
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

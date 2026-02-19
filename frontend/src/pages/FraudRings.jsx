@@ -336,8 +336,8 @@ export default function FraudRings() {
 
   const uiRings = hasBackendData
     ? backendRings
-        .slice()
-        .sort((a, b) => b.risk_score - a.risk_score)
+      .slice()
+      .sort((a, b) => b.risk_score - a.risk_score)
     : fraudRingsData
 
   const [activeRingIdx, setActiveRingIdx] = useState(0)
@@ -353,12 +353,12 @@ export default function FraudRings() {
 
         <header className="h-auto flex items-end justify-between px-8 pb-8 shrink-0">
           <div>
-              <h2 className="text-5xl font-medium text-white tracking-tight leading-none font-display mb-2">Active Investigations</h2>
-              <p className="text-text-muted text-sm max-w-xl font-body">
-                {hasBackendData
-                  ? 'Fraud rings detected by the latest backend run.'
-                  : 'Sample investigations. Upload data on Home to see live rings.'}
-              </p>
+            <h2 className="text-5xl font-medium text-white tracking-tight leading-none font-display mb-2">Active Investigations</h2>
+            <p className="text-text-muted text-sm max-w-xl font-body">
+              {hasBackendData
+                ? 'Fraud rings detected by the latest backend run.'
+                : 'Sample investigations. Upload data on Home to see live rings.'}
+            </p>
           </div>
         </header>
 
@@ -373,7 +373,7 @@ export default function FraudRings() {
                     <th className="px-6 py-5 text-[11px] font-semibold text-text-muted uppercase tracking-widest font-body">Pattern</th>
                     <th className="px-6 py-5 text-[11px] font-semibold text-text-muted uppercase tracking-widest text-right font-body">Entities</th>
                     <th className="px-6 py-5 text-[11px] font-semibold text-text-muted uppercase tracking-widest w-48 font-body">Risk Score</th>
-                    <th className="px-6 py-5 text-[11px] font-semibold text-text-muted uppercase tracking-widest text-right font-body">Cohesion</th>
+                    <th className="px-6 py-5 text-[11px] font-semibold text-text-muted uppercase tracking-widest font-body">Member Account IDs</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.03]">
@@ -402,7 +402,9 @@ export default function FraudRings() {
                             <span className={`text-xs font-technical w-10 text-right ${isActive ? 'text-white' : 'text-text-muted'}`}>{Math.round(riskScore)}</span>
                           </div>
                         </td>
-                        <td className={`px-6 py-4 text-right font-technical text-xs ${isActive ? 'text-white' : 'text-text-muted'}`}>{cohesion.toFixed ? cohesion.toFixed(2) : cohesion}</td>
+                        <td className={`px-6 py-4 text-xs font-technical truncate max-w-[300px] ${isActive ? 'text-white' : 'text-text-muted'}`}>
+                          {hasBackendData ? ring.member_accounts.join(', ') : ring.entityList.map(e => e.id).join(', ')}
+                        </td>
                       </tr>
                     )
                   })}
@@ -460,22 +462,22 @@ export default function FraudRings() {
               <div className="space-y-2">
                 {hasBackendData
                   ? activeRing.member_accounts.slice(0, 20).map((acct, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.04] hover:bg-white/[0.04] transition-all group">
-                        <div>
-                          <p className="text-xs font-medium text-neutral-300 group-hover:text-white transition-colors font-technical">{acct}</p>
-                          <p className="text-[9px] text-text-muted uppercase mt-0.5 font-body">Member Account</p>
-                        </div>
+                    <div key={idx} className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.04] hover:bg-white/[0.04] transition-all group">
+                      <div>
+                        <p className="text-xs font-medium text-neutral-300 group-hover:text-white transition-colors font-technical">{acct}</p>
+                        <p className="text-[9px] text-text-muted uppercase mt-0.5 font-body">Member Account</p>
                       </div>
-                    ))
+                    </div>
+                  ))
                   : activeRing.entityList.map((entity, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.04] hover:bg-white/[0.04] transition-all cursor-pointer group">
-                        <div>
-                          <p className="text-xs font-medium text-neutral-300 group-hover:text-white transition-colors font-technical">{entity.id}</p>
-                          <p className="text-[9px] text-text-muted uppercase mt-0.5 font-body">{entity.role}</p>
-                        </div>
-                        <span className="text-xs font-technical font-medium text-accent-red">{entity.score}</span>
+                    <div key={idx} className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.04] hover:bg-white/[0.04] transition-all cursor-pointer group">
+                      <div>
+                        <p className="text-xs font-medium text-neutral-300 group-hover:text-white transition-colors font-technical">{entity.id}</p>
+                        <p className="text-[9px] text-text-muted uppercase mt-0.5 font-body">{entity.role}</p>
                       </div>
-                    ))}
+                      <span className="text-xs font-technical font-medium text-accent-red">{entity.score}</span>
+                    </div>
+                  ))}
               </div>
             </div>
 

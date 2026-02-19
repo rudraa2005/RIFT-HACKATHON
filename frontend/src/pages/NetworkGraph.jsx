@@ -34,21 +34,8 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
     // Decide which accounts to include:
     // - If a ring is highlighted: only that ring's accounts
     // - Otherwise: all accounts in rings with risk_score > 75
-    let allowedAccounts = new Set()
-    if (highlightRing) {
-      fraudRings
-        .filter((r) => r.ring_id === highlightRing)
-        .forEach((r) => r.member_accounts.forEach((acct) => allowedAccounts.add(String(acct))))
-    } else {
-      fraudRings
-        .filter((r) => r.risk_score >= 75)
-        .forEach((r) => r.member_accounts.forEach((acct) => allowedAccounts.add(String(acct))))
-    }
-
-    // If no rings qualify, fall back to all suspicious accounts.
-    if (!allowedAccounts.size && suspiciousList.length) {
-      suspiciousList.forEach((a) => allowedAccounts.add(a.account_id))
-    }
+    // By competition requirement: show ALL account nodes.
+    const allowedAccounts = new Set(analysis.graph_data.nodes.map(n => String(n.id)))
 
     // Build adjacency for account-level navigation
     analysis.graph_data.edges.forEach((edge) => {
@@ -86,15 +73,20 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
       const meta = accountMeta.get(id) || { suspicion: node.risk_score || 0, ringId: null }
       const ringId = meta.ringId
       const ringScore = ringId ? ringRisk.get(ringId) ?? 0 : 0
-      const isSuspicious = meta.suspicion >= 75 || node.is_suspicious || (node.risk_score || 0) >= 75
+
+      // Use a lower threshold (50) for visual distinction, but high threshold for 'flagged' status
+      const suspicionScore = meta.suspicion || 0
+      const isSuspicious = suspicionScore >= 50 || node.is_suspicious || (node.risk_score || 0) >= 50
+      const isHighlySuspicious = suspicionScore >= 75
 
       if (!nodeMap.has(id)) {
         nodeMap.set(id, {
           globalId: id,
           label: id,
-          role: isSuspicious ? 'Suspicious' : 'Monitored',
-          r: isSuspicious ? 8 : 5,
-          color: isSuspicious ? '#e5e5e5' : '#444',
+          role: isHighlySuspicious ? 'High Risk' : (isSuspicious ? 'Suspicious' : 'Monitored'),
+          // Visual scaling based on risk
+          r: isHighlySuspicious ? 12 : (isSuspicious ? 9 : 5),
+          color: isHighlySuspicious ? '#ef4444' : (isSuspicious ? '#f59e0b' : '#444'),
           ringId,
           accId: id,
           txnId: '',
@@ -103,6 +95,7 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
           ringType: ringId ? fraudRings.find((r) => r.ring_id === ringId)?.pattern_type ?? null : null,
           ringScore,
           isSuspicious,
+          suspicionScore,
         })
         allNodes.push(nodeMap.get(id))
       }
@@ -324,54 +317,50 @@ export default function NetworkGraph() {
         const isSel = selectedNode?.globalId === n.globalId
         const isHL = n.isHighlighted // Belongs to the searched ring
 
-        // Size
+        // size and opacity
         const baseR = n.r * 2.8
         let drawR = baseR * (isHov ? 1.3 : 1) / zoom
 
-        // Highlights Logic
-        // If a ring is highlighted:
-        // - Nodes in ring (isHL) -> Full Opacity, White Glow
-        // - Nodes NOT in ring -> Low Opacity (dimmed)
-        // If NO ring highlighted (Default View):
-        // - Standard clean look, no glows, simple borders
         const isDimmed = highlightRing && !isHL && !isHov && !isSel
+        const isSuspicious = n.isSuspicious || n.suspicionScore > 50
 
-        // 1. Draw Glow (Only for active/hovered/highlighted/selected)
-        // REMOVED glow for 'suspicious' in default view to keep it clean
-        if (!isDimmed && (isHov || isHL || isSel)) {
+        // 1. Draw Glow (Red for high risk, White for regular interaction)
+        if (!isDimmed && (isHov || isHL || isSel || isSuspicious)) {
           ctx.beginPath(); ctx.arc(n.x, n.y, drawR + (isHov ? 12 : 8) / zoom, 0, Math.PI * 2)
-          // Pure White Glow
-          const glowAlpha = isHov ? 0.6 : (isHL ? 0.5 : 0.2)
-          ctx.fillStyle = `rgba(255, 255, 255, ${glowAlpha})`; ctx.fill()
+          if (n.role === 'High Risk') {
+            ctx.fillStyle = `rgba(239, 68, 68, ${isHov ? 0.4 : 0.25})`;
+          } else if (n.role === 'Suspicious') {
+            ctx.fillStyle = `rgba(245, 158, 11, ${isHov ? 0.4 : 0.25})`;
+          } else {
+            ctx.fillStyle = `rgba(255, 255, 255, ${isHov ? 0.6 : 0.2})`;
+          }
+          ctx.fill()
         }
 
-        // 2. Main Circle Body -> Simple Black
+        // 2. Main Circle Body -> Black or Color tint
         ctx.beginPath()
         ctx.arc(n.x, n.y, drawR, 0, Math.PI * 2)
         ctx.fillStyle = '#000000'
-        ctx.globalAlpha = isDimmed ? 0.35 : 1 // Increased visibility for dimmed context (0.1 -> 0.35)
+        ctx.globalAlpha = isDimmed ? 0.35 : 1
         ctx.fill()
         ctx.globalAlpha = 1
 
-        // 3. Border - Minimalist
-        // If HIGHLIGHTING is active, use high contrast white
-        // If DEFAULT view, use subtle grey/white for visibility but no strong gradients
+        // 3. Border - Use data color
         const grad = ctx.createLinearGradient(n.x - drawR, n.y - drawR, n.x + drawR, n.y + drawR)
 
         if (isDimmed) {
           grad.addColorStop(0, '#333'); grad.addColorStop(1, '#111')
         } else if (isHL || isHov || isSel) {
-          // High Contrast for Active Elements
           grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#aaaaaa')
+        } else if (isSuspicious) {
+          grad.addColorStop(0, n.color || '#ef4444'); grad.addColorStop(1, '#7f1d1d')
         } else {
-          // Default View - Very subtle, clean
-          // User requested "remove extra white boundary", so we make it darker (Deep Grey)
           grad.addColorStop(0, '#333333'); grad.addColorStop(1, '#111111')
         }
 
         ctx.strokeStyle = grad
-        ctx.lineWidth = (isHov || isHL ? 2.5 : 1.0) / zoom // Thinner default border
-        ctx.globalAlpha = isDimmed ? 0.35 : 1 // Match body opacity
+        ctx.lineWidth = (isHov || isHL || isSuspicious ? 3.0 : 1.0) / zoom
+        ctx.globalAlpha = isDimmed ? 0.35 : 1
         ctx.stroke()
         ctx.globalAlpha = 1
 

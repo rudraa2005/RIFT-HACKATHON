@@ -27,27 +27,34 @@ from app.config import (
 
 def detect_cycles(G: nx.MultiDiGraph, df: pd.DataFrame) -> List[Dict[str, Any]]:
     """
-    Detect suspicious circular fund routing in the transaction graph.
-
-    Returns:
-        List of ring dicts: {ring_id, members, pattern_type, amounts,
-                             time_span_hours, cv, risk_score}
-
-    Time Complexity: O(C * L) where C = candidate cycles, L = max cycle length
+    Detect suspicious circular fund routing using SCC decomposition for speed.
     """
     simple_G = nx.DiGraph(G)
-
     suspicious_cycles = []
     ring_counter = 0
 
-    try:
-        all_cycles = list(nx.simple_cycles(simple_G, length_bound=MAX_CYCLE_LENGTH))
-    except Exception:
-        all_cycles = []
+    # Optimization: Filter for SCCs of size >= MIN_CYCLE_LENGTH
+    # simple_cycles is much faster when run per component
+    sccs = [c for c in nx.strongly_connected_components(simple_G) if len(c) >= MIN_CYCLE_LENGTH]
 
-    for cycle in all_cycles:
-        if len(cycle) < MIN_CYCLE_LENGTH or len(cycle) > MAX_CYCLE_LENGTH:
+    MAX_CANDIDATE_CYCLES = 1000
+
+    for component in sccs:
+        subgraph = simple_G.subgraph(component)
+        try:
+            # Use an iterator to limit candidate cycles
+            cycle_gen = nx.simple_cycles(subgraph, length_bound=MAX_CYCLE_LENGTH)
+            all_cycles = []
+            for i, cycle in enumerate(cycle_gen):
+                all_cycles.append(cycle)
+                if i >= MAX_CANDIDATE_CYCLES:
+                    break
+        except Exception:
             continue
+
+        for cycle in all_cycles:
+            if len(cycle) < MIN_CYCLE_LENGTH or len(cycle) > MAX_CYCLE_LENGTH:
+                continue
 
         amounts = []
         timestamps = []

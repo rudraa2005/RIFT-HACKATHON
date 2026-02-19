@@ -9,9 +9,12 @@ Time Complexity: O(V)
 Memory: O(V)
 """
 
-from typing import Any, Dict, Set
+import logging
+import math
+from typing import Any, Dict, List, Set, Tuple
 
 import pandas as pd
+import numpy as np
 
 from app.config import (
     NONLINEAR_BASE_BONUS,
@@ -71,19 +74,11 @@ def compute_scores(
     rapid_forwarding: Set[str] | None = None,
     dormant_activation: Set[str] | None = None,
     structured_fragmentation: Set[str] | None = None,
-    # Forensic timing maps (account_id -> timestamp_str)
+    anomaly_scores: Dict[str, float] | None = None,
     trigger_times: Dict[str, Dict[str, str]] | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Compute raw suspicion scores for every account in the dataset.
-
-    Returns:
-        {account_id: {
-            "score": float, 
-            "patterns": [str, ...],
-            "breakdown": {pattern: score},
-            "timeline": [{"time": str, "event": str}]
-        }}
     """
     from app.config import (
         SCORE_RAPID_FORWARDING,
@@ -106,11 +101,11 @@ def compute_scores(
     rapid_forwarding = rapid_forwarding or set()
     dormant_activation = dormant_activation or set()
     structured_fragmentation = structured_fragmentation or set()
+    anomaly_scores = anomaly_scores or {}
     trigger_times = trigger_times or {}
 
     high_velocity, velocity_triggers = compute_high_velocity_accounts(df)
     
-    # Merge velocity triggers into the main trigger map
     if "high_velocity" not in trigger_times:
         trigger_times["high_velocity"] = velocity_triggers
 
@@ -178,33 +173,35 @@ def compute_scores(
                 breakdown[p_name] = p_score
                 pattern_count += 1
                 
-                # Forensic timeline event
                 event_time = trigger_times.get(p_name, {}).get(account, "Unknown")
                 timeline.append({"time": event_time, "event": p_name.replace("_", " ").title()})
 
-        # Sort timeline by time
+        # Add Anomaly Score from Isolation Forest (up to 40 points)
+        if account in anomaly_scores:
+            a_score = float(anomaly_scores[account]) * 40.0
+            if a_score > 5.0:  # Only add if meaningful
+                score += a_score
+                patterns.append("behavioral_anomaly")
+                breakdown["behavioral_anomaly"] = round(a_score, 2)
+                timeline.append({"time": "Analysis Time", "event": "Behavioral Anomaly Detected"})
+
         timeline.sort(key=lambda x: x["time"])
 
-        # Multi-pattern bonus (≥2)
         if pattern_count >= 2:
             score += SCORE_MULTI_PATTERN_BONUS
             patterns.append("multi_pattern")
             breakdown["multi_pattern_bonus"] = SCORE_MULTI_PATTERN_BONUS
 
-        # False positive dampeners - STRONG penalties to prevent false positives
         if account in merchant_accounts:
-            # Merchants should be heavily penalized - almost zero risk
-            score = max(0.0, score * 0.1)  # Reduce to 10% of original
+            score = max(0.0, score * 0.1)
             patterns.append("merchant_like")
             breakdown["merchant_penalty"] = SCORE_MERCHANT_PENALTY
 
         if account in payroll_accounts:
-            # Payroll accounts (both senders and recipients) should be heavily penalized
-            score = max(0.0, score * 0.1)  # Reduce to 10% of original
+            score = max(0.0, score * 0.1)
             patterns.append("payroll_like")
             breakdown["payroll_penalty"] = SCORE_PAYROLL_PENALTY
 
-        # Nonlinear amplifier
         if pattern_count >= NONLINEAR_MIN_PATTERNS:
             nonlinear_bonus = NONLINEAR_BASE_BONUS + NONLINEAR_PER_PATTERN * (
                 pattern_count - NONLINEAR_MIN_PATTERNS
@@ -212,20 +209,42 @@ def compute_scores(
             score += nonlinear_bonus
             patterns.append("nonlinear_amplifier")
             breakdown["nonlinear_multiplier"] = nonlinear_bonus
-        # Behavioural adjustments:
-        # - Down-weight single-pattern hits (likely weak evidence)
-        # - Up-weight rich multi-pattern behaviour
+
         core_pattern_count = sum(
             1 for p in patterns
             if p not in {"multi_pattern", "nonlinear_amplifier", "merchant_like", "payroll_like"}
         )
+        # Behavioural smoothing
         if core_pattern_count == 1:
-            score *= 0.75
+            score *= 0.5  # Heavy penalize single pattern to prevent clusters at 100
         elif core_pattern_count >= 3:
-            score *= 1.25
+            score *= 1.1
 
-        # Clamp preliminary score to a safe range
-        score = max(0.0, _capped(score))
+        score = max(0.0, score)
+
+        # --- Structural-pattern gate ---
+        # An account must have at least one structural/behavioral pattern
+        # to be flagged. Pure network-derived signals alone are not enough.
+        _STRUCTURAL_EVIDENCE = {
+            "cycle", "smurfing_aggregator", "smurfing_disperser",
+            "shell_account", "high_velocity", "rapid_pass_through",
+            "rapid_forwarding", "deep_layered_cascade", "low_retention_pass_through",
+            "high_throughput_ratio", "balance_oscillation_pass_through",
+            "sudden_activity_spike", "dormant_activation_spike",
+            "structured_fragmentation", "behavioral_anomaly",
+        }
+        has_structural = bool(set(patterns) & _STRUCTURAL_EVIDENCE)
+        if not has_structural:
+            score = 0.0
+
+        # Deduplicate patterns while preserving order
+        seen = set()
+        unique_patterns = []
+        for p in patterns:
+            if p not in seen:
+                seen.add(p)
+                unique_patterns.append(p)
+        patterns = unique_patterns
 
         scores[account] = {
             "score": score,
@@ -234,40 +253,6 @@ def compute_scores(
             "timeline": timeline,
             "pattern_count": core_pattern_count,
         }
-
-    # Second pass: percentile-based normalization to avoid clustering at 100
-    import numpy as np
-    
-    all_scores = [data["score"] for data in scores.values() if data["score"] > 0]
-    if not all_scores:
-        return scores
-    
-    # Use 95th percentile as anchor instead of max to prevent clustering
-    p95 = np.percentile(all_scores, 95)
-    p50 = np.percentile(all_scores, 50)
-    
-    for acct, data in scores.items():
-        raw = data["score"]
-        if raw <= 0:
-            data["score"] = 0.0
-            continue
-        
-        # Non-linear mapping: use sigmoid-like curve anchored at p95
-        if p95 > 0:
-            # Normalize relative to p95
-            normalized = min(raw / p95, 1.5)  # Allow some accounts to exceed p95
-            # Apply sigmoid-like transformation for better distribution
-            # Accounts below p50 get compressed, accounts above p95 get emphasized
-            if normalized < 0.5:
-                shaped = normalized * 0.6  # Compress low scores
-            elif normalized < 1.0:
-                shaped = 0.3 + (normalized - 0.5) * 0.5  # Linear middle
-            else:
-                shaped = 0.55 + (normalized - 1.0) * 0.45  # Emphasize high scores
-            
-            data["score"] = round(shaped * 100.0, 2)
-        else:
-            data["score"] = round(min(raw, 100.0), 2)
 
     return scores
 

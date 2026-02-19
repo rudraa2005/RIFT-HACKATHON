@@ -1,11 +1,13 @@
 """
-Risk Propagation Module — Recursive Network Risk.
+Risk Propagation Module — Depth-Limited Network Risk.
 
 After base scoring, propagates risk through the transaction graph:
-  Risk(X) = BaseScore + α × mean(Risk(neighbors))
-  α = 0.2, max 3 iterations.
+  - Only 1 iteration (single hop)
+  - Only propagates FROM accounts that have structural patterns
+  - 0.3 decay factor
+  - Minimum 15-point increase required for tagging
 
-Time Complexity: O(iterations × (V + E))
+Time Complexity: O(V + E)
 Memory: O(V)
 """
 
@@ -13,7 +15,17 @@ from typing import Any, Dict, Set
 
 import networkx as nx
 
-from app.config import RISK_PROPAGATION_ALPHA, RISK_PROPAGATION_ITERATIONS
+
+# Patterns that represent direct structural evidence of fraud
+_STRUCTURAL_PATTERNS = {
+    "cycle", "smurfing_aggregator", "smurfing_disperser",
+    "shell_account", "rapid_pass_through", "rapid_forwarding",
+    "deep_layered_cascade", "dormant_activation_spike",
+    "structured_fragmentation",
+}
+
+PROPAGATION_DECAY = 0.3
+EXPOSURE_THRESHOLD = 15.0
 
 
 def propagate_risk(
@@ -21,54 +33,45 @@ def propagate_risk(
     scores: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Propagate risk through the network graph.
+    Propagate risk through the network graph (depth-limited).
 
-    Modifies scores in-place, adding "network_risk_exposure" pattern
-    for accounts whose score increases by ≥5 points.
+    Only propagates FROM accounts that have at least one structural pattern.
+    Single hop, 0.3 decay, minimum 15-point increase for exposure tag.
 
     Returns:
         Updated scores dict
     """
     simple_G = nx.DiGraph(G).to_undirected()
-    current_scores: Dict[str, float] = {}
 
+    # Identify accounts with structural patterns (confirmed suspicious)
+    structural_sources: Set[str] = set()
     for acct, data in scores.items():
-        current_scores[acct] = data["score"]
+        acct_patterns = set(data.get("patterns", []))
+        if acct_patterns & _STRUCTURAL_PATTERNS:
+            structural_sources.add(acct)
 
-    base_scores = dict(current_scores)
+    if not structural_sources:
+        return scores
 
-    for _ in range(RISK_PROPAGATION_ITERATIONS):
-        new_scores: Dict[str, float] = {}
-        for node in simple_G.nodes():
-            if node not in current_scores:
+    base_scores = {acct: data["score"] for acct, data in scores.items()}
+
+    # Single pass: propagate FROM structural sources to their direct neighbors
+    for source in structural_sources:
+        if source not in simple_G:
+            continue
+        source_score = base_scores.get(source, 0)
+        if source_score <= 0:
+            continue
+
+        for neighbor in simple_G.neighbors(source):
+            if neighbor not in scores:
                 continue
-
-            neighbors = list(simple_G.neighbors(node))
-            if not neighbors:
-                new_scores[node] = current_scores[node]
-                continue
-
-            neighbor_scores = [
-                current_scores.get(n, 0) for n in neighbors
-            ]
-            mean_neighbor = sum(neighbor_scores) / len(neighbor_scores)
-
-            propagated = current_scores[node] + RISK_PROPAGATION_ALPHA * mean_neighbor
-            new_scores[node] = max(0, min(100, propagated))
-
-        current_scores = new_scores
-
-    # Update scores with propagated values
-    exposure_accounts: Set[str] = set()
-    for acct in scores:
-        new_val = current_scores.get(acct, scores[acct]["score"])
-        increase = new_val - base_scores.get(acct, 0)
-
-        if increase >= 5:
-            exposure_accounts.add(acct)
-            if "network_risk_exposure" not in scores[acct]["patterns"]:
-                scores[acct]["patterns"].append("network_risk_exposure")
-
-        scores[acct]["score"] = round(max(0, min(100, new_val)), 2)
+            # Only boost if neighbor has LOWER score (don't boost already-high accounts)
+            boost = source_score * PROPAGATION_DECAY
+            current = scores[neighbor]["score"]
+            if boost > EXPOSURE_THRESHOLD and current < source_score:
+                scores[neighbor]["score"] = round(current + boost * 0.5, 2)
+                if "network_risk_exposure" not in scores[neighbor]["patterns"]:
+                    scores[neighbor]["patterns"].append("network_risk_exposure")
 
     return scores

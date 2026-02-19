@@ -34,10 +34,13 @@ Memory: O(V + E) for graph + O(R) for rings.
 
 import logging
 import os
+import time
 from typing import Any, Dict, Set
 
 import networkx as nx
 import pandas as pd
+import numpy as np
+from scipy.stats import rankdata
 
 from core.graph.graph_builder import build_graph
 from core.structural.cycle_detection import detect_cycles
@@ -60,7 +63,6 @@ from core.risk.normalization import normalize_scores
 from core.risk.risk_propagation import propagate_risk
 from core.risk.network_analysis import (
     build_neighbor_map,
-    propagate_group_risk,
     compute_component_concentration,
 )
 from core.forwarding_latency import detect_rapid_forwarding
@@ -73,6 +75,7 @@ from core.output.json_formatter import format_output
 from core.ml.feature_vector_builder import build_feature_vectors, vectors_to_matrix
 from core.ml.ml_model import RiskModel
 from core.ml.hybrid_scorer import compute_hybrid_scores
+from core.ml.anomaly_detector import detect_anomalies, aggregate_anomaly_scores
 from app.config import ML_ENABLED, ML_MODEL_PATH
 
 logger = logging.getLogger(__name__)
@@ -104,10 +107,12 @@ class ProcessingService:
             df = df.sample(n=MAX_TRANSACTIONS, random_state=42)
 
         # 0. Compute Adaptive Thresholds
+        t_start = time.time()
         thresholds = compute_adaptive_thresholds(df)
         logger.info("Adaptive thresholds computed: %s", thresholds)
 
         # 1. Build graph
+        t0 = time.time()
         G = build_graph(df)
         total_accounts = G.number_of_nodes()
 
@@ -115,7 +120,9 @@ class ProcessingService:
         trigger_times: Dict[str, Dict[str, str]] = {}
 
         # 2. Cycle detection
+        t_cyc = time.time()
         cycle_rings = detect_cycles(G, df)
+        print(f"Cycle detection took {time.time() - t_cyc:.2f}s")
         cycle_accounts: set = set()
         cycle_triggers: Dict[str, str] = {}
         for ring in cycle_rings:
@@ -126,6 +133,7 @@ class ProcessingService:
         trigger_times["cycle"] = cycle_triggers
 
         # 3. Smurfing detection
+        t_smurf = time.time()
         smurf_rings, aggregators, dispersers, smurf_triggers = detect_smurfing(
             df,
             min_senders_override=thresholds["smurfing_min_senders"],
@@ -134,6 +142,7 @@ class ProcessingService:
         trigger_times.update(smurf_triggers)
 
         # 4. Shell chain detection
+        t_shell = time.time()
         shell_rings, shell_accounts = detect_shell_chains(G, df)
         trigger_times["shell_account"] = {
             acct: str(df["timestamp"].max()) for acct in shell_accounts
@@ -202,7 +211,13 @@ class ProcessingService:
         # 14. False positive detection
         merchant_accounts, payroll_accounts = detect_false_positives(df)
 
+        # 14.5 Unsupervised Anomaly Detection (Isolation Forest)
+        t_ml = time.time()
+        txn_anomaly_scores = detect_anomalies(df)
+        anomaly_scores = aggregate_anomaly_scores(df, txn_anomaly_scores)
+
         # 15. Compute scores (all patterns)
+        t_score = time.time()
         raw_scores = compute_scores(
             df=df,
             cycle_accounts=cycle_accounts,
@@ -224,40 +239,36 @@ class ProcessingService:
             rapid_forwarding=forwarding_accounts,
             dormant_activation=dormant_accounts,
             structured_fragmentation=structuring_accounts,
+            anomaly_scores=anomaly_scores,
             trigger_times=trigger_times,
         )
 
-        # 16. Normalize scores to [0, 100]
-        normalized = normalize_scores(raw_scores)
+        # 16. Use raw scores for propagation (Removed normalize_scores to prevent clamping)
+        normalized = raw_scores 
 
         # 17. Risk propagation (graph-based) — mutates normalized in-place
+        t_prop = time.time()
         normalized = propagate_risk(G, normalized)
 
-        # 18. Neighbor-based group risk propagation
+        # 18. Build neighbor map for connectivity analysis
         neighbor_map = build_neighbor_map(df)
-        base_risk = {acct: data["score"] for acct, data in normalized.items()}
-        propagated_risk = propagate_group_risk(
-            base_risk, neighbor_map, alpha=0.15, iterations=2, min_neighbors=2
-        )
-        # Merge propagated scores back (clamp to [0, 100])
-        for acct in normalized:
-            if acct in propagated_risk:
-                normalized[acct]["score"] = min(100.0, max(0.0, propagated_risk[acct]))
 
         # 19. Closeness centrality on suspicious subgraph
+        t_close = time.time()
         suspicious_set = {
             acct for acct, data in normalized.items() if data["score"] > 0
         }
         closeness_accounts, _ = compute_closeness_centrality(G, suspicious_set)
 
         # 20. Local clustering on suspicious subgraph
+        t_clust = time.time()
         clustering_accounts, _ = detect_high_clustering(G, suspicious_set)
 
-        # Add closeness & clustering patterns post-propagation
+        # Add closeness & clustering patterns post-propagation (reduced weight)
         for acct in closeness_accounts:
             if acct in normalized:
                 normalized[acct]["score"] = min(
-                    100, normalized[acct]["score"] + 15
+                    100, normalized[acct]["score"] + 5
                 )
                 if "high_closeness_centrality" not in normalized[acct]["patterns"]:
                     normalized[acct]["patterns"].append("high_closeness_centrality")
@@ -265,13 +276,23 @@ class ProcessingService:
         for acct in clustering_accounts:
             if acct in normalized:
                 normalized[acct]["score"] = min(
-                    100, normalized[acct]["score"] + 15
+                    100, normalized[acct]["score"] + 5
                 )
                 if "high_local_clustering" not in normalized[acct]["patterns"]:
                     normalized[acct]["patterns"].append("high_local_clustering")
 
-        # 21. Combine all rings and compute ring risk
-        all_rings = cycle_rings + smurf_rings + shell_rings + scc_rings
+        # 21. Combine all rings (SCC excluded — it's a supplementary pattern, not a ring)
+        all_rings = cycle_rings + smurf_rings + shell_rings
+
+        # Deduplicate rings by member set
+        seen_member_sets = {}
+        deduped_rings = []
+        for ring in all_rings:
+            key = frozenset(ring["members"])
+            if key not in seen_member_sets or ring["risk_score"] > seen_member_sets[key]["risk_score"]:
+                seen_member_sets[key] = ring
+        deduped_rings = list(seen_member_sets.values())
+        all_rings = deduped_rings
 
         high_velocity: Set[str] = set()
         for acct, data in normalized.items():
@@ -352,26 +373,49 @@ class ProcessingService:
             if data.get("score", 0.0) >= 1.0
         ]
         susp_G = G.subgraph(suspicious_nodes).to_undirected()
-        wcc = list(nx.connected_components(susp_G))
+        wcc_list = list(nx.connected_components(susp_G))
 
-        # 23.5 Network Concentration Boost (Improve Accuracy)
-        # If an account is in a component with high average risk, boost its score.
-        for component in wcc:
-            comp_scores = [normalized.get(node, {"score": 0.0})["score"] for node in component]
-            if comp_scores:
-                avg_comp_risk = sum(comp_scores) / len(comp_scores)
-                if avg_comp_risk > 40.0:  # Highly suspicious cluster
-                    for node in component:
-                        if node in normalized:
-                            # Boost by up to 15 points based on cluster risk
-                            boost = (avg_comp_risk / 100.0) * 15.0
-                            normalized[node]["score"] = min(100.0, normalized[node]["score"] + boost)
-                            if "network_concentration_boost" not in normalized[node]["patterns"]:
-                                normalized[node]["patterns"].append("network_concentration_boost")
+        # 23.5 Network Concentration Boost — REMOVED
+        # Previously added blind +15 to all connected component members, causing false positives.
 
-        conn_metrics["is_single_network"] = len(wcc) == 1 if wcc else False
-        conn_metrics["connected_components_count"] = len(wcc)
-        conn_metrics["largest_component_size"] = max(len(c) for c in wcc) if wcc else 0
+        conn_metrics["is_single_network"] = len(wcc_list) == 1 if wcc_list else False
+        conn_metrics["connected_components_count"] = len(wcc_list)
+        conn_metrics["largest_component_size"] = max(len(c) for c in wcc_list) if wcc_list else 0
+        
+        # New: Compute SCC distribution and Depth distribution for Analytics
+        import numpy as np
+        scc_sizes = sorted([len(c) for c in wcc_list], reverse=True)[:20]
+        # Pad with zeros if less than 20
+        if len(scc_sizes) < 20:
+            scc_sizes += [0] * (20 - len(scc_sizes))
+        # Scale to match the UI expectations (0-100 bars)
+        max_size = max(scc_sizes) if scc_sizes and max(scc_sizes) > 0 else 1
+        scc_bars = [(s / max_size) * 100 for s in scc_sizes]
+        
+        # Depth analysis logic
+        depths = []
+        for account in normalized:
+            if "deep_layered_cascade" in normalized[account].get("patterns", []):
+                # Sample depth or use degree as proxy if actual depth per account isn't stored
+                depths.append(G.in_degree(account) + G.out_degree(account))
+        
+        avg_depth = sum(depths) / len(depths) if depths else 0
+        depth_bars = sorted([min(100, d * 10) for d in depths], reverse=True)[:8]
+        if len(depth_bars) < 8:
+            depth_bars += [10] * (8 - len(depth_bars))
+
+        # 72H Burst activity (simulated from timestamps)
+        df['hour_bucket'] = df['timestamp'].dt.floor('h')
+        burst_counts = df.groupby('hour_bucket').size().tail(20).tolist()
+        if len(burst_counts) < 20:
+            burst_counts = [0] * (20 - len(burst_counts)) + burst_counts
+        max_burst = max(burst_counts) if burst_counts and max(burst_counts) > 0 else 1
+        burst_series = [(b / max_burst) * 100 for b in burst_counts]
+
+        conn_metrics["scc_distribution"] = scc_bars
+        conn_metrics["avg_cascade_depth"] = round(avg_depth, 2)
+        conn_metrics["depth_distribution"] = depth_bars
+        conn_metrics["burst_activity"] = burst_series
 
         # 25. Build Graph Data for Visualization
         nodes = []
@@ -409,7 +453,37 @@ class ProcessingService:
             "edges": edges,
         }
 
-        # 26. Format output
+        # 26. Final Nuanced Scoring - Rank-based normalization
+        # This occurs after ALL boosts (ML, propagation, centrality, etc.)
+        acct_ids = list(normalized.keys())
+        raw_vals = np.array([normalized[aid]["score"] for aid in acct_ids])
+        
+        nonzero_mask = raw_vals > 0
+        if np.any(nonzero_mask):
+            # Using 'ordinal' method breaks ties to force a distribution
+            # instead of bunching same-score accounts at the same rank.
+            ranks = rankdata(raw_vals[nonzero_mask], method='ordinal')
+            num_suspicious = len(ranks)
+            percentiles = ranks / num_suspicious
+            
+            # Non-linear spread (x^2.8)
+            # This ensures only the top ~10% get scores > 80
+            final_percentiles = np.power(percentiles, 2.8) 
+            scaled_scores = final_percentiles * 100.0
+            
+            idx = 0
+            for i, aid in enumerate(acct_ids):
+                if nonzero_mask[i]:
+                    new_score = round(float(scaled_scores[idx]), 2)
+                    normalized[aid]["score"] = new_score
+                    # Also sync final_risk_score so format_output picks it up
+                    normalized[aid]["final_risk_score"] = round(new_score / 100.0, 4)
+                    idx += 1
+                else:
+                    normalized[aid]["score"] = 0.0
+                    normalized[aid]["final_risk_score"] = 0.0
+
+        # 27. Format output
         res = format_output(
             scores=normalized,
             all_rings=all_rings,
@@ -417,4 +491,5 @@ class ProcessingService:
             graph_data=graph_data,
         )
         res["summary"]["network_connectivity"] = conn_metrics
+        res["summary"]["processing_time_seconds"] = time.time() - t_start
         return res

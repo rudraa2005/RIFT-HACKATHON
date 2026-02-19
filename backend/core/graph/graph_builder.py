@@ -12,12 +12,15 @@ import networkx as nx
 def build_graph(df: pd.DataFrame) -> nx.MultiDiGraph:
     """Build a NetworkX MultiDiGraph from transaction DataFrame."""
     G = nx.MultiDiGraph()
-    for _, row in df.iterrows():
-        G.add_edge(
-            row["sender_id"],
-            row["receiver_id"],
-            amount=float(row["amount"]),
-            timestamp=str(row["timestamp"]),
-            transaction_id=str(row["transaction_id"]),
-        )
+    
+    # Use zip for much faster iteration than iterrows()
+    edges = zip(
+        df["sender_id"],
+        df["receiver_id"],
+        [
+            {"amount": float(a), "timestamp": str(t), "transaction_id": str(tid)}
+            for a, t, tid in zip(df["amount"], df["timestamp"], df["transaction_id"])
+        ]
+    )
+    G.add_edges_from(edges)
     return G
