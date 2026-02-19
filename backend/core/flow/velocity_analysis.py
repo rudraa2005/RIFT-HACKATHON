@@ -19,7 +19,7 @@ from app.config import HIGH_VELOCITY_THRESHOLD
 def compute_high_velocity_accounts(
     df: pd.DataFrame,
     multiplier_override: float | None = None,
-) -> Tuple[Set[str], Dict[str, str]]:
+) -> tuple[Set[str], Dict[str, str]]:
     """
     Identify accounts with normalized velocity > threshold.
 

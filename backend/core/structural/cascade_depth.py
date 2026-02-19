@@ -20,7 +20,7 @@ from datetime import timedelta
 from app.config import CASCADE_MAX_HOPS, CASCADE_MIN_DEPTH, CASCADE_WINDOW_HOURS
 
 
-def detect_cascade_depth(G: nx.MultiDiGraph, df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Set[str]]:
+def detect_cascade_depth(G: nx.MultiDiGraph, df: pd.DataFrame) -> tuple[list[dict[str, any]], Set[str]]:
     """
     Detect accounts involved in deep layered cascades within time windows.
 
@@ -32,7 +32,7 @@ def detect_cascade_depth(G: nx.MultiDiGraph, df: pd.DataFrame) -> Tuple[List[Dic
     window_delta = timedelta(hours=CASCADE_WINDOW_HOURS)
 
     flagged: Set[str] = set()
-    rings: List[Dict[str, Any]] = []
+    rings: list[dict[str, any]] = []
     simple_G = nx.DiGraph(G)
 
     # Pre-build edge timestamp map for fast lookup
