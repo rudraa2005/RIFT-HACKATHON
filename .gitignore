@@ -1,0 +1,123 @@
+############################
+# Python
+############################
+
+__pycache__/
+*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Pipenv / Poetry
+Pipfile.lock
+poetry.lock
+
+############################
+# Environment Variables
+############################
+
+.env
+.env.*
+*.env
+
+############################
+# Logs
+############################
+
+*.log
+logs/
+*.out
+*.err
+
+############################
+# Testing / Coverage
+############################
+
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+############################
+# IDE / Editor
+############################
+
+.vscode/
+.idea/
+.gemini/
+.agent/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+
+############################
+# OS Files
+############################
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+############################
+# Node (For Future Frontend)
+############################
+
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+############################
+# Frontend Build
+############################
+
+.next/
+.out/
+
+############################
+# Docker
+############################
+
+*.pid
+*.seed
+*.tar
+*.gz
+
+############################
+# Database (If Added Later)
+############################
+
+*.sqlite3
+*.db
+
+############################
+# Temporary Files
+############################
+
+*.tmp
+*.bak
+*.cache
+
+############################
+# Jupyter Notebooks (if used)
+############################
+
+.ipynb_checkpoints/
+
+############################
+# Data Files (Optional)
+############################
+
+data_samples/*.csv
