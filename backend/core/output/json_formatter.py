@@ -75,7 +75,8 @@ def format_output(
     suspicious_accounts: List[Dict[str, Any]] = []
     for account_id, data in scores.items():
         # Only include accounts with meaningful risk
-        if data["score"] <= 5.0:
+        # EXCEPTION: Ring members are always included for structural recall
+        if data["score"] <= 5.0 and account_id not in account_ring_map:
             continue
 
         detected_patterns = list(dict.fromkeys(

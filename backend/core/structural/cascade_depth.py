@@ -20,20 +20,19 @@ from datetime import timedelta
 from app.config import CASCADE_MAX_HOPS, CASCADE_MIN_DEPTH, CASCADE_WINDOW_HOURS
 
 
-def detect_cascade_depth(G: nx.MultiDiGraph, df: pd.DataFrame) -> Set[str]:
+def detect_cascade_depth(G: nx.MultiDiGraph, df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Set[str]]:
     """
     Detect accounts involved in deep layered cascades within time windows.
 
     Returns:
-        Set of flagged account IDs
-
-    Time Complexity: O(V × D × avg_out_degree), bounded by CASCADE_MAX_HOPS
+        (rings_list, flagged_account_ids_set)
     """
     df = df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     window_delta = timedelta(hours=CASCADE_WINDOW_HOURS)
 
     flagged: Set[str] = set()
+    rings: List[Dict[str, Any]] = []
     simple_G = nx.DiGraph(G)
 
     # Pre-build edge timestamp map for fast lookup
@@ -44,42 +43,54 @@ def detect_cascade_depth(G: nx.MultiDiGraph, df: pd.DataFrame) -> Set[str]:
             edge_times[key] = []
         edge_times[key].append(row["timestamp"])
 
+    ring_idx = 1
     for start_node in simple_G.nodes():
+        start_node_str = str(start_node)
         start_times = []
-        for _, row in df[df["sender_id"] == start_node].iterrows():
-            start_times.append(row["timestamp"])
+        # Filter df for start_node sender efficiency
+        node_df = df[df["sender_id"] == start_node]
+        start_times = node_df["timestamp"].tolist()
 
         if not start_times:
             continue
 
         for start_ts in start_times[:3]:  # Limit starting points for performance
             max_depth = 0
-            stack = [(start_node, 0, start_ts)]
-            visited_in_path: set = {start_node}
+            # store path in stack: (node, depth, last_ts, path)
+            stack = [(start_node_str, 0, start_ts, [start_node_str])]
+            best_chain = [start_node_str]
 
             while stack:
-                node, depth, last_ts = stack.pop()
-                max_depth = max(max_depth, depth)
+                node, depth, last_ts, path = stack.pop()
+                if depth > max_depth:
+                    max_depth = depth
+                    best_chain = path
 
                 if depth >= CASCADE_MAX_HOPS:
                     continue
 
                 for neighbor in simple_G.successors(node):
-                    if neighbor in visited_in_path:
+                    neighbor_str = str(neighbor)
+                    if neighbor_str in path:
                         continue
 
-                    key = (str(node), str(neighbor))
+                    key = (node, neighbor_str)
                     times = edge_times.get(key, [])
 
-                    valid = False
                     for t in times:
                         if t >= last_ts and (t - start_ts) <= window_delta:
-                            visited_in_path.add(neighbor)
-                            stack.append((neighbor, depth + 1, t))
-                            valid = True
+                            stack.append((neighbor_str, depth + 1, t, path + [neighbor_str]))
                             break
 
             if max_depth >= CASCADE_MIN_DEPTH:
-                flagged.add(str(start_node))
+                flagged.add(start_node_str)
+                rings.append({
+                    "ring_id": f"RING_CASCADE_{ring_idx:03d}",
+                    "members": best_chain,
+                    "pattern_type": "deep_layered_cascade",
+                    "risk_score": round(min(100, 50 + max_depth * 10), 2)
+                })
+                ring_idx += 1
+                break
 
-    return flagged
+    return rings, flagged

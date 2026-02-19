@@ -107,7 +107,7 @@ def _find_shell_chains(
 
 
 def detect_shell_chains(
-    G: nx.MultiDiGraph, df: pd.DataFrame
+    G: nx.MultiDiGraph, df: pd.DataFrame, exclude_nodes: Set[str] | None = None
 ) -> Tuple[List[Dict[str, Any]], Set[str]]:
     """
     Detect shell chain patterns.
@@ -116,6 +116,8 @@ def detect_shell_chains(
         (rings_list, shell_account_ids_set)
     """
     shell_accounts = _identify_shell_accounts(G, df)
+    if exclude_nodes:
+        shell_accounts = shell_accounts - exclude_nodes
     chains = _find_shell_chains(G, shell_accounts)
 
     rings: List[Dict[str, Any]] = []

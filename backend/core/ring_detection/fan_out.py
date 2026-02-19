@@ -73,12 +73,18 @@ def detect_fan_out(
                 
             ring_counter += 1
             members = [sender_id] + list(window["receiver_id"].unique())
+            
+            # Explicit behavioral tagging for members
+            member_patterns = {str(m): ["fan_out_participant", "structured_amount"] for m in window["receiver_id"].unique()}
+            member_patterns[sender_id] = ["smurfing_disperser"]
+            
             rings.append(
                 {
                     "ring_id": f"RING_SMURF_{ring_counter:03d}",
                     "members": members,
+                    "member_patterns": member_patterns,
                     "pattern_type": "smurfing_fan_out",
-                    "risk_score": round(min(100, 70 + unique_receivers * 1.5), 2),
+                    "risk_score": round(min(100, 90 + unique_receivers * 1.0), 2),
                 }
             )
             break

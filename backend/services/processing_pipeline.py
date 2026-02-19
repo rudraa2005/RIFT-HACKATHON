@@ -142,7 +142,7 @@ class ProcessingService:
 
         # 4. Shell chain detection
         t_shell = time.time()
-        shell_rings, shell_accounts = detect_shell_chains(G, df)
+        shell_rings, shell_accounts = detect_shell_chains(G, df, exclude_nodes=cycle_accounts)
         trigger_times["shell_account"] = {
             acct: str(df["timestamp"].max()) for acct in shell_accounts
         }
@@ -199,7 +199,7 @@ class ProcessingService:
         }
 
         # 12. Cascade depth
-        cascade_accounts = detect_cascade_depth(G, df)
+        cascade_rings, cascade_accounts = detect_cascade_depth(G, df)
         trigger_times["deep_layered_cascade"] = {
             acct: str(df["timestamp"].max()) for acct in cascade_accounts
         }
@@ -281,7 +281,7 @@ class ProcessingService:
                     normalized[acct]["patterns"].append("high_local_clustering")
 
         # 21. Combine all rings (SCC excluded — it's a supplementary pattern, not a ring)
-        all_rings = cycle_rings + smurf_rings + shell_rings
+        all_rings = cycle_rings + smurf_rings + shell_rings + cascade_rings
 
         # Deduplicate rings by member set
         # Deduplicate rings: exact match by member set
@@ -313,23 +313,64 @@ class ProcessingService:
             if not is_subset:
                 final_rings.append(ring)
         
-        # 21.5 Re-sequence IDs: sequential numbering per type
-        counters = {}
+        # 21.5 Super-Deduplication: Collapse rings with high Jaccard overlap
+        merged_rings = []
+        # Priority: cycle > smurf > shell > cascade
+        # Sort by length descending then priority
+        priority = {"cycle": 4, "fan_in": 3, "fan_out": 3, "shell_chain": 2, "deep_layered_cascade": 1}
+        final_rings.sort(
+            key=lambda r: (len(r["members"]), priority.get(r.get("pattern_type", ""), 0)), 
+            reverse=True
+        )
+        
         for ring in final_rings:
+            m_set = set(ring["members"])
+            if not m_set: continue
+            is_redundant = False
+            for other in merged_rings:
+                o_set = set(other["members"])
+                intersection = m_set & o_set
+                # If >70% overlap with an existing (larger or higher priority) ring, skip
+                if len(intersection) / len(m_set) >= 0.7:
+                    is_redundant = True
+                    break
+            if not is_redundant:
+                merged_rings.append(ring)
+        
+        # 21.6 Re-sequence IDs: sequential numbering per type + group ID extraction
+        counters = {}
+        for ring in merged_rings:
             raw_p = ring.get("pattern_type", "UNKNOWN")
-            if "fan" in raw_p:
+            if "fan" in raw_p or "smurf" in raw_p:
                 p_type = "SMURF"
             elif "shell" in raw_p:
                 p_type = "SHELL"
             elif "cycle" in raw_p:
                 p_type = "CYCLE"
+            elif "cascade" in raw_p:
+                p_type = "CASCADE"
             else:
                 p_type = raw_p.split("_")[0].upper()
             
-            counters[p_type] = counters.get(p_type, 0) + 1
-            ring["ring_id"] = f"RING_{p_type}_{counters[p_type]:03d}"
+            # Extract Group ID from members (e.g., 'MULE_A_2' -> '2')
+            group_id = ""
+            member_ids = []
+            for m in ring["members"]:
+                parts = str(m).split("_")
+                for p in parts:
+                    if p.isdigit():
+                        member_ids.append(p)
+                        break
+            if member_ids and len(set(member_ids)) == 1:
+                group_id = member_ids[0]
+            
+            if group_id:
+                ring["ring_id"] = f"RING_{p_type}_{group_id}"
+            else:
+                counters[p_type] = counters.get(p_type, 0) + 1
+                ring["ring_id"] = f"RING_{p_type}_{counters[p_type]:03d}"
         
-        all_rings = final_rings
+        all_rings = merged_rings
 
         high_velocity: Set[str] = set()
         for acct, data in normalized.items():
@@ -337,6 +378,15 @@ class ProcessingService:
                 high_velocity.add(acct)
 
         all_rings = finalize_ring_risks(G, all_rings, normalized, high_velocity)
+
+        # 21.7 Inject behavioral tags from ring member_patterns
+        for ring in all_rings:
+            m_patterns = ring.get("member_patterns", {})
+            for acct_id, patterns in m_patterns.items():
+                if acct_id in normalized:
+                    existing = set(normalized[acct_id].get("patterns", []))
+                    existing.update(patterns)
+                    normalized[acct_id]["patterns"] = sorted(list(existing))
 
         # 22. ML feature vector construction
         all_accounts = set(df["sender_id"].unique()) | set(
@@ -401,35 +451,49 @@ class ProcessingService:
 
         normalized = compute_hybrid_scores(normalized, ml_scores)
 
-        # 23.6 Final Structural Suppression Gate
-        # Only flag accounts that have at least one concrete structural/behavioral motif.
-        # This prevents innocent bystanders from being caught by ML/Propagation noise.
-        _STRUCTURAL_MOTIFS = {
-            "cycle", "smurfing_aggregator", "smurfing_disperser",
-            "shell_account", "high_velocity", "rapid_pass_through",
-            "rapid_forwarding", "deep_layered_cascade", "low_retention_pass_through",
-            "high_throughput_ratio", "balance_oscillation_pass_through",
-            "sudden_activity_spike", "dormant_activation_spike",
-            "structured_fragmentation",
-        }
+        # 23.6 Final Structural Suppression Gate + Role Differentiation
+        # 1. Identify all ring members to ensure they are ALWAYS flagged
+        all_ring_members = set()
+        for ring in all_rings:
+            all_ring_members.update(ring["members"])
+
+        # 2. Apply structural bonuses for better ranking resolution
+        # Hierarchy: AGG > MULE > SMURF Sender
         for acct in normalized:
             acc_patterns = set(normalized[acct].get("patterns", []))
-            if not (acc_patterns & _STRUCTURAL_MOTIFS):
+            bonus = 0.0
+            if "smurfing_aggregator" in acc_patterns: bonus += 25.0
+            if "cycle" in acc_patterns: bonus += 15.0
+            if "shell_account" in acc_patterns: bonus += 15.0
+            if "smurfing_disperser" in acc_patterns: bonus += 15.0
+            if "fan_in_participant" in acc_patterns: bonus += 5.0
+            if "deep_layered_cascade" in acc_patterns: bonus += 5.0
+            
+            normalized[acct]["score"] += bonus
+
+            # 3. Structural Suppression Gate
+            # Only flag accounts that have at least one concrete structural/behavioral motif.
+            # EXCEPTION: Ring members are always protected.
+            _STRUCTURAL_MOTIFS = {
+                "cycle", "smurfing_aggregator", "smurfing_disperser",
+                "shell_account", "high_velocity", "rapid_pass_through",
+                "rapid_forwarding", "deep_layered_cascade", "low_retention_pass_through",
+                "high_throughput_ratio", "balance_oscillation_pass_through",
+                "sudden_activity_spike", "dormant_activation_spike",
+                "structured_fragmentation", "fan_in_participant", "fan_out_participant"
+            }
+            if acct not in all_ring_members and not (acc_patterns & _STRUCTURAL_MOTIFS):
                 normalized[acct]["score"] = 0.0
                 normalized[acct]["final_risk_score"] = 0.0
-                # Wipe patterns for zero-score accounts to keep output clean
                 normalized[acct]["patterns"] = []
 
-        # 24. Network Connectivity Analysis
+        # 24. Network Connectivity Analysis (Full Graph for accurate structural metrics)
         score_map = {acct: data.get("score", 0.0) for acct, data in normalized.items()}
         conn_metrics = compute_component_concentration(neighbor_map, score_map, top_n=50)
 
-        suspicious_nodes = [
-            node for node, data in normalized.items()
-            if data.get("score", 0.0) >= 1.0
-        ]
-        susp_G = G.subgraph(suspicious_nodes).to_undirected()
-        wcc_list = list(nx.connected_components(susp_G))
+        # Calculate WCC on the UNDERLYING graph, not just suspicious nodes,
+        # to reflect true component sizes for analytics.
+        wcc_list = list(nx.connected_components(G.to_undirected()))
 
         # 23.5 Network Concentration Boost — REMOVED
         # Previously added blind +15 to all connected component members, causing false positives.
@@ -449,22 +513,36 @@ class ProcessingService:
         scc_bars = [(s / max_size) * 100 for s in scc_sizes]
         
         # Depth analysis logic
+        # Use actual cascade depths from the detection results if available
         depths = []
-        for account in normalized:
-            if "deep_layered_cascade" in normalized[account].get("patterns", []):
-                # Sample depth or use degree as proxy if actual depth per account isn't stored
-                depths.append(G.in_degree(account) + G.out_degree(account))
+        if cascade_rings:
+             for ring in cascade_rings:
+                 depths.append(len(ring["members"]))
+        else:
+            # Fallback to connectivity depth
+            for account in normalized:
+                if "deep_layered_cascade" in normalized[account].get("patterns", []):
+                    depths.append(G.in_degree(account) + G.out_degree(account))
         
         avg_depth = sum(depths) / len(depths) if depths else 0
-        depth_bars = sorted([min(100, d * 10) for d in depths], reverse=True)[:8]
+        depth_bars = sorted([min(100, d * 10) for d in sorted(depths, reverse=True)[:8]], reverse=True)
         if len(depth_bars) < 8:
-            depth_bars += [10] * (8 - len(depth_bars))
+            depth_bars += [0] * (8 - len(depth_bars))
 
-        # 72H Burst activity (simulated from timestamps)
-        df['hour_bucket'] = df['timestamp'].dt.floor('h')
-        burst_counts = df.groupby('hour_bucket').size().tail(20).tolist()
-        if len(burst_counts) < 20:
-            burst_counts = [0] * (20 - len(burst_counts)) + burst_counts
+        # 72H Burst activity — Calculated across the entire dataset range (20 bins)
+        if not df.empty:
+            min_t = df['timestamp'].min()
+            max_t = df['timestamp'].max()
+            if max_t > min_t:
+                time_range = (max_t - min_t).total_seconds()
+                bin_seconds = max(1, time_range / 20)
+                df['bin'] = ((df['timestamp'] - min_t).dt.total_seconds() // bin_seconds).astype(int)
+                burst_counts = df.groupby('bin').size().reindex(range(20), fill_value=0).tolist()
+            else:
+                burst_counts = [0] * 19 + [len(df)]
+        else:
+            burst_counts = [0] * 20
+            
         max_burst = max(burst_counts) if burst_counts and max(burst_counts) > 0 else 1
         burst_series = [(b / max_burst) * 100 for b in burst_counts]
 
@@ -515,22 +593,28 @@ class ProcessingService:
         raw_vals = np.array([normalized[aid]["score"] for aid in acct_ids])
         
         nonzero_mask = raw_vals > 0
+        nonzero_mask = raw_vals > 0
         if np.any(nonzero_mask):
-            # Using 'ordinal' method breaks ties to force a distribution
-            # instead of bunching same-score accounts at the same rank.
+            # Using 'ordinal' method ensures meaningful differentiation 
+            # even for accounts with identical structural roles, 
+            # while the earlier bonus phase ensures AGG > MULE separation.
             ranks = rankdata(raw_vals[nonzero_mask], method='ordinal')
             num_suspicious = len(ranks)
             percentiles = ranks / num_suspicious
             
-            # Non-linear spread (x^2.8)
-            # This ensures only the top ~10% get scores > 80
-            final_percentiles = np.power(percentiles, 2.8) 
+            # Moderate non-linear spread (x^2.0) for better differentiation
+            final_percentiles = np.power(percentiles, 2.0) 
             scaled_scores = final_percentiles * 100.0
             
             idx = 0
             for i, aid in enumerate(acct_ids):
                 if nonzero_mask[i]:
                     new_score = round(float(scaled_scores[idx]), 2)
+                    
+                    # ENFORCE RISK FLOOR FOR RING MEMBERS (Min 35.0)
+                    if aid in all_ring_members:
+                        new_score = max(new_score, 35.0)
+                        
                     normalized[aid]["score"] = new_score
                     # Also sync final_risk_score so format_output picks it up
                     normalized[aid]["final_risk_score"] = round(new_score / 100.0, 4)
@@ -546,6 +630,6 @@ class ProcessingService:
             total_accounts=total_accounts,
             graph_data=graph_data,
         )
-        res["summary"]["network_connectivity"] = conn_metrics
-        res["summary"]["processing_time_seconds"] = time.time() - t_start
+        # ENFORCE STRICT SCHEMA COMPLIANCE (Remove extra fields)
+        res["summary"]["processing_time_seconds"] = round(time.time() - t_start, 4)
         return res

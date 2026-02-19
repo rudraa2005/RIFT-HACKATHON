@@ -51,7 +51,7 @@ def enhance_ring_risk(
     velocity_count = sum(1 for m in members if m in high_velocity)
     velocity_multiplier = 10 if velocity_count >= len(members) * 0.5 else 0
 
-    risk = avg_score + density_component + velocity_multiplier
+    risk = max(float(ring.get("risk_score", 0)), avg_score + density_component + velocity_multiplier)
     return round(min(100, risk), 2)
 
 

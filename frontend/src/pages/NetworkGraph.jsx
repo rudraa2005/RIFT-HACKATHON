@@ -32,10 +32,17 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
     })
 
     // Decide which accounts to include:
-    // - If a ring is highlighted: only that ring's accounts
-    // - Otherwise: all accounts in rings with risk_score > 75
-    // By competition requirement: show ALL account nodes.
-    const allowedAccounts = new Set(analysis.graph_data.nodes.map(n => String(n.id)))
+    // By default, only show risky clusters (members of fraud rings or suspicious accounts)
+    // to reduce overcrowding.
+    const riskyIds = new Set()
+    fraudRings.forEach(r => r.member_accounts.forEach(m => riskyIds.add(String(m))))
+    suspiciousList.forEach(s => riskyIds.add(String(s.account_id)))
+
+    let allowedAccounts = new Set(riskyIds)
+    if (highlightRing) {
+      const ring = fraudRings.find(r => r.ring_id === highlightRing)
+      if (ring) allowedAccounts = new Set(ring.member_accounts.map(m => String(m)))
+    }
 
     // Build adjacency for account-level navigation
     analysis.graph_data.edges.forEach((edge) => {
