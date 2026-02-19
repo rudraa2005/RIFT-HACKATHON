@@ -313,10 +313,21 @@ class ProcessingService:
             if not is_subset:
                 final_rings.append(ring)
         
-        # 21.5 Re-sequence IDs and ensure they start from 001
-        for i, ring in enumerate(final_rings, 1):
-            p_type = ring.get("pattern_type", "UNKNOWN").split("_")[0].upper()
-            ring["ring_id"] = f"RING_{p_type}_{i:03d}"
+        # 21.5 Re-sequence IDs: sequential numbering per type
+        counters = {}
+        for ring in final_rings:
+            raw_p = ring.get("pattern_type", "UNKNOWN")
+            if "fan" in raw_p:
+                p_type = "SMURF"
+            elif "shell" in raw_p:
+                p_type = "SHELL"
+            elif "cycle" in raw_p:
+                p_type = "CYCLE"
+            else:
+                p_type = raw_p.split("_")[0].upper()
+            
+            counters[p_type] = counters.get(p_type, 0) + 1
+            ring["ring_id"] = f"RING_{p_type}_{counters[p_type]:03d}"
         
         all_rings = final_rings
 
