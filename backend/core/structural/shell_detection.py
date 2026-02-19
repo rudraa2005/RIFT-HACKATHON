@@ -44,10 +44,18 @@ def _identify_shell_accounts(G: nx.MultiDiGraph, df: pd.DataFrame) -> Set[str]:
         if total_degree > SHELL_MAX_DEGREE:
             continue
 
+        # Must have BOTH incoming and outgoing edges (pass-through behavior)
+        if G.in_degree(node) == 0 or G.out_degree(node) == 0:
+            continue
+
         # Transaction count check
         n_in = in_counts.get(node_str, 0)
         n_out = out_counts.get(node_str, 0)
         if (n_in + n_out) > SHELL_MAX_TRANSACTIONS:
+            continue
+
+        # Must have both incoming and outgoing transactions
+        if n_in == 0 or n_out == 0:
             continue
 
         # Holding time check

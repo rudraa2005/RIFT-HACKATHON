@@ -284,14 +284,41 @@ class ProcessingService:
         all_rings = cycle_rings + smurf_rings + shell_rings
 
         # Deduplicate rings by member set
+        # Deduplicate rings: exact match by member set
         seen_member_sets = {}
-        deduped_rings = []
         for ring in all_rings:
             key = frozenset(ring["members"])
             if key not in seen_member_sets or ring["risk_score"] > seen_member_sets[key]["risk_score"]:
                 seen_member_sets[key] = ring
+        
         deduped_rings = list(seen_member_sets.values())
-        all_rings = deduped_rings
+        # Collapse subset rings: if ring A ⊂ ring B, drop A
+        # We prioritize cycles > smurfing > shell
+        final_rings = []
+        # Sort by length descending, then by pattern priority
+        priority = {"cycle": 3, "fan_in": 2, "fan_out": 2, "shell_chain": 1}
+        sorted_rings = sorted(
+            deduped_rings, 
+            key=lambda r: (len(r["members"]), priority.get(r.get("pattern_type", ""), 0)), 
+            reverse=True
+        )
+
+        for ring in sorted_rings:
+            ring_set = frozenset(ring["members"])
+            is_subset = False
+            for other in final_rings:
+                if ring_set <= frozenset(other["members"]):
+                    is_subset = True
+                    break
+            if not is_subset:
+                final_rings.append(ring)
+        
+        # 21.5 Re-sequence IDs and ensure they start from 001
+        for i, ring in enumerate(final_rings, 1):
+            p_type = ring.get("pattern_type", "UNKNOWN").split("_")[0].upper()
+            ring["ring_id"] = f"RING_{p_type}_{i:03d}"
+        
+        all_rings = final_rings
 
         high_velocity: Set[str] = set()
         for acct, data in normalized.items():
@@ -362,6 +389,25 @@ class ProcessingService:
                 logger.warning("ML model file not found at %s; using rule-only scoring", model_path)
 
         normalized = compute_hybrid_scores(normalized, ml_scores)
+
+        # 23.6 Final Structural Suppression Gate
+        # Only flag accounts that have at least one concrete structural/behavioral motif.
+        # This prevents innocent bystanders from being caught by ML/Propagation noise.
+        _STRUCTURAL_MOTIFS = {
+            "cycle", "smurfing_aggregator", "smurfing_disperser",
+            "shell_account", "high_velocity", "rapid_pass_through",
+            "rapid_forwarding", "deep_layered_cascade", "low_retention_pass_through",
+            "high_throughput_ratio", "balance_oscillation_pass_through",
+            "sudden_activity_spike", "dormant_activation_spike",
+            "structured_fragmentation",
+        }
+        for acct in normalized:
+            acc_patterns = set(normalized[acct].get("patterns", []))
+            if not (acc_patterns & _STRUCTURAL_MOTIFS):
+                normalized[acct]["score"] = 0.0
+                normalized[acct]["final_risk_score"] = 0.0
+                # Wipe patterns for zero-score accounts to keep output clean
+                normalized[acct]["patterns"] = []
 
         # 24. Network Connectivity Analysis
         score_map = {acct: data.get("score", 0.0) for acct, data in normalized.items()}

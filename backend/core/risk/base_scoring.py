@@ -231,7 +231,7 @@ def compute_scores(
             "rapid_forwarding", "deep_layered_cascade", "low_retention_pass_through",
             "high_throughput_ratio", "balance_oscillation_pass_through",
             "sudden_activity_spike", "dormant_activation_spike",
-            "structured_fragmentation", "behavioral_anomaly",
+            "structured_fragmentation",
         }
         has_structural = bool(set(patterns) & _STRUCTURAL_EVIDENCE)
         if not has_structural:
