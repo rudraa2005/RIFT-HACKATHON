@@ -40,7 +40,9 @@ FEATURE_NAMES: List[str] = [
     # Schema-Signals (27–29)
     "is_round_amount", "is_night_transaction", "is_high_amount_outlier",
     # Advanced Structural (30-31)
-    "pagerank", "local_clustering"
+    "pagerank", "local_clustering",
+    # New Behavioral Extensions (32-37)
+    "tx_per_hour", "max_amount", "min_amount", "total_volume", "in_out_flow_ratio", "avg_time_between_tx"
 ]
 
 NUM_BINARY_FEATURES: int = 20
@@ -54,7 +56,7 @@ def _compute_behavioral_features(
     G: Optional[nx.MultiDiGraph],
     df: Optional[pd.DataFrame],
 ) -> List[float]:
-    res = [0.0] * 7
+    res = [0.0] * 13 # 7 + 6 new ones
     if G is None or not G.has_node(account):
         return res
 
@@ -67,7 +69,7 @@ def _compute_behavioral_features(
 
     if df is not None:
         mask = (df["sender_id"] == account) | (df["receiver_id"] == account)
-        acct_txns = df[mask]
+        acct_txns = df[mask].copy()
         if not acct_txns.empty:
             amounts = acct_txns["amount"].astype(float).values
             res[2] = _safe_log1p(len(amounts))
@@ -75,10 +77,25 @@ def _compute_behavioral_features(
             res[4] = _safe_log1p(np.std(amounts))
             counterparties = set(acct_txns["sender_id"]) | set(acct_txns["receiver_id"])
             res[5] = _safe_log1p(len(counterparties) - 1)
+            
+            ts = pd.to_datetime(acct_txns["timestamp"])
+            span = (ts.max() - ts.min()).total_seconds() / 3600
+            res[6] = _safe_log1p(span)
+            
+            # New Behavioral Extensions
+            res[7] = (len(amounts) / max(1.0, span)) # tx_per_hour
+            res[8] = _safe_log1p(np.max(amounts)) # max_amount
+            res[9] = _safe_log1p(np.min(amounts)) # min_amount
+            res[10] = _safe_log1p(np.sum(amounts)) # total_volume
+            
+            in_vol = acct_txns[acct_txns["receiver_id"] == account]["amount"].sum()
+            out_vol = acct_txns[acct_txns["sender_id"] == account]["amount"].sum()
+            res[11] = in_vol / max(1.0, out_vol) # in_out_flow_ratio
+            
             if len(amounts) > 1:
-                ts = pd.to_datetime(acct_txns["timestamp"])
-                span = (ts.max() - ts.min()).total_seconds() / 3600
-                res[6] = _safe_log1p(span)
+                intervals = ts.sort_values().diff().dt.total_seconds().dropna() / 3600
+                res[12] = _safe_log1p(intervals.mean()) # avg_time_between_tx
+                
     return res
 
 def build_feature_vectors(

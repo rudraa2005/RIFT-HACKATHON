@@ -1,7 +1,7 @@
 {
   "version": 1,
   "params": {
-    "C": 1.0,
+    "C": 0.5,
     "solver": "lbfgs",
     "max_iter": 2000,
     "random_state": 42,

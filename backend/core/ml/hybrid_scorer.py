@@ -61,15 +61,33 @@ def compute_hybrid_scores(
 
         if use_ml and account in ml_scores:
             ml_score = float(ml_scores[account])
-            data["ml_risk_score"] = round(ml_score, 4)
-            data["final_risk_score"] = round(
-                rule_weight * rule_normalized + ml_weight * ml_score, 4
-            )
+            data["ml_risk_score"] = float(round(ml_score, 4))
+            
+            # Non-Linear Blending: Consensus Multiplier
+            # If both engines agree (ML > 0.5 and Rule > 0.5), amplify the score.
+            # If ML is extremely high (>0.8), treat it as a strong behavioral indicator.
+            
+            base_final = rule_weight * rule_normalized + ml_weight * ml_score
+            
+            # Factor 1: Consensus Boost (up to 25% amplification)
+            consensus_multiplier = 1.0
+            if rule_normalized > 0.5 and ml_score > 0.5:
+                consensus_multiplier = 1.25
+            
+            # Factor 2: Behavioral Override (if ML is very high, it can pull up low rule scores)
+            behavioral_boost = 0.0
+            if ml_score > 0.8 and rule_normalized < 0.3:
+                behavioral_boost = 0.2 # Strongly pull up suspicious behavioral patterns
+                
+            final_score = min(1.0, (base_final * consensus_multiplier) + behavioral_boost)
+            
+            data["final_risk_score"] = float(round(final_score, 4))
+            data["score"] = float(round(final_score * 100.0, 2))
             data["scoring_method"] = "hybrid"
         else:
             # Fallback: pure rule score
             data["ml_risk_score"] = 0.0
-            data["final_risk_score"] = round(rule_normalized, 4)
+            data["final_risk_score"] = float(round(rule_normalized, 4))
             data["scoring_method"] = "rule_only"
 
     return normalized_scores

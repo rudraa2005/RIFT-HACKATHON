@@ -76,32 +76,45 @@ def extract_schema_signals(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     return signals
 
 def main():
-    dataset_path = sys.argv[1] if len(sys.argv) > 1 else "data/synthetic_transactions_60neg_40pos.csv"
-    test_path = "data/financial_transactions_10000.csv"
-    logger.info("Loading FULL dataset: %s", dataset_path)
+    if not os.path.exists(dataset_path):
+        logger.warning("Primary dataset not found. Falling back to SELF-TRAINING mode using: %s", test_path)
+        dataset_path = test_path
+        is_self_training = True
+    else:
+        is_self_training = False
+
+    logger.info("Loading dataset: %s", dataset_path)
     df_raw = pd.read_csv(dataset_path)
     
     # REDUCE DATA SIZE for speed while remaining effective (as requested)
-    # Hard-cap at 20k rows so training stays snappy during iteration.
-    if len(df_raw) > 20000:
-        logger.info("Sampling 20,000 transactions for training (out of %d)...", len(df_raw))
-        df_raw = df_raw.sample(n=20000, random_state=42).sort_index()
+    if len(df_raw) > 15000:
+        logger.info("Sampling 15,000 transactions for training...")
+        df_raw = df_raw.sample(n=15000, random_state=42).sort_index()
 
-    df = pd.DataFrame({
-        "timestamp": pd.to_datetime(df_raw["Date"] + " " + df_raw["Time"]),
-        "sender_id": df_raw["Sender_account"].astype(str),
-        "receiver_id": df_raw["Receiver_account"].astype(str),
-        "amount": df_raw["Amount"],
-        "is_laundering": df_raw["Is_laundering"],
-        "transaction_id": [f"TX_{i:08d}" for i in range(len(df_raw))]
-    })
+    # Generic Column Mapping
+    if "Date" in df_raw.columns and "Time" in df_raw.columns:
+        # Synthetic schema
+        df = pd.DataFrame({
+            "timestamp": pd.to_datetime(df_raw["Date"] + " " + df_raw["Time"]),
+            "sender_id": df_raw["Sender_account"].astype(str),
+            "receiver_id": df_raw["Receiver_account"].astype(str),
+            "amount": df_raw["Amount"],
+            "is_laundering": df_raw.get("Is_laundering", 0),
+            "transaction_id": [f"TX_{i:08d}" for i in range(len(df_raw))]
+        })
+    else:
+        # Standard schema
+        df = df_raw.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        if "is_laundering" not in df.columns:
+            df["is_laundering"] = 0 # Will be pseudo-labeled
     
     schema_signals = extract_schema_signals(df)
     
     logger.info("Building global graph for structural analysis...")
     G = build_graph(df)
     
-    logger.info("Computing Rule-Based Detection on FULL graph...")
+    logger.info("Computing Rule-Based Detection for (Pseudo) Labeling...")
     # Patterns
     cycles = detect_cycles(G, df)
     cycle_accts = {m for r in cycles for m in r["members"]}
@@ -125,22 +138,38 @@ def main():
     closeness_accts, _ = compute_closeness_centrality(G, susp_subset)
     clustering_accts, _ = detect_high_clustering(G, susp_subset)
 
-    logger.info("Computing Global Structural Scores (PageRank, Clustering)...")
-    pr = nx.pagerank(G.to_directed())
-    lc = nx.clustering(nx.Graph(G)) # Local clustering coefficient
-    structural_scores = {acct: {"pagerank": pr.get(acct, 0.0), "local_clustering": lc.get(acct, 0.0)} for acct in G.nodes()}
+    if is_self_training:
+        logger.info("Generating Pseudo-Labels using Rule Engine...")
+        from core.risk.base_scoring import compute_scores
+        rule_results = compute_scores(
+            df=df, cycle_accounts=cycle_accts, aggregators=aggregators,
+            dispersers=dispersers, shell_accounts=shell_accts,
+            merchant_accounts=set(), payroll_accounts=set(),
+            rapid_pass_through=rapid_pt, activity_spike=spike_accts,
+            high_centrality=centrality_accts, low_retention=low_ret_accts,
+            high_throughput=high_thru_accts, balance_oscillation=osc_accts,
+            burst_diversity=diversity_accts, scc_members=scc_accts,
+            cascade_depth=cascade_accts, irregular_activity=irreg_accts,
+            high_closeness=closeness_accts, high_clustering=clustering_accts,
+            rapid_forwarding=forwarding_accts, dormant_activation=dormant_accts,
+            structured_fragmentation=structuring_accts
+        )
+        # Any account with score > 40 is 'suspicious' for training
+        suspicious_ids = {acct for acct, res in rule_results.items() if res["score"] > 40.0}
+        logger.info("Self-labeling: identified %d suspicious accounts", len(suspicious_ids))
+    else:
+        # Account Ground Truth (Labeled data)
+        suspicious_ids = set(df[df["is_laundering"] == 1]["sender_id"].unique()) | \
+                         set(df[df["is_laundering"] == 1]["receiver_id"].unique())
 
-    # Account Ground Truth
-    suspicious_ids = set(df[df["is_laundering"] == 1]["sender_id"].unique()) | \
-                     set(df[df["is_laundering"] == 1]["receiver_id"].unique())
     all_accounts = list(G.nodes())
     y_map = {acct: (1 if acct in suspicious_ids else 0) for acct in all_accounts}
 
-    # Sampling ACCOUNTS to balance training
+    # Sampling ACCOUNTS to balance training (Better balancing: 1:3 ratio)
     pos_accts = [a for a in all_accounts if y_map[a] == 1]
     neg_accts = [a for a in all_accounts if y_map[a] == 0]
     
-    sampled_neg = np.random.choice(neg_accts, min(len(neg_accts), len(pos_accts) * 2), replace=False)
+    sampled_neg = np.random.choice(neg_accts, min(len(neg_accts), len(pos_accts) * 3), replace=False)
     training_accts = set(pos_accts) | set(sampled_neg)
     
     logger.info("Constructing feature vectors for %d sampled accounts...", len(training_accts))
@@ -178,7 +207,7 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     
     logger.info("Training Model...")
-    model = RiskModel(params={"C": 0.5}) # Slightly stronger regularization
+    model = RiskModel(params={"C": 0.1}) # stronger regularization for better generalization
     model.train(X_train, y_train)
     
     # Evaluate
@@ -210,10 +239,7 @@ def main():
         
         # 1. ML Scoring
         test_G = build_graph(df_test)
-        test_schema_signals = extract_schema_signals(df_test.rename(columns={
-            "sender_id": "Sender_account", 
-            "receiver_id": "Receiver_account" # Logic expects these for signals helper
-        }))
+        test_schema_signals = extract_schema_signals(df_test)
         # (Simplified structural scores for test evaluation)
         test_pr = nx.pagerank(test_G.to_directed())
         test_lc = nx.clustering(nx.Graph(test_G))

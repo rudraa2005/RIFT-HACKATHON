@@ -354,6 +354,21 @@ class ProcessingService:
         susp_G = G.subgraph(suspicious_nodes).to_undirected()
         wcc = list(nx.connected_components(susp_G))
 
+        # 23.5 Network Concentration Boost (Improve Accuracy)
+        # If an account is in a component with high average risk, boost its score.
+        for component in wcc:
+            comp_scores = [normalized.get(node, {"score": 0.0})["score"] for node in component]
+            if comp_scores:
+                avg_comp_risk = sum(comp_scores) / len(comp_scores)
+                if avg_comp_risk > 40.0:  # Highly suspicious cluster
+                    for node in component:
+                        if node in normalized:
+                            # Boost by up to 15 points based on cluster risk
+                            boost = (avg_comp_risk / 100.0) * 15.0
+                            normalized[node]["score"] = min(100.0, normalized[node]["score"] + boost)
+                            if "network_concentration_boost" not in normalized[node]["patterns"]:
+                                normalized[node]["patterns"].append("network_concentration_boost")
+
         conn_metrics["is_single_network"] = len(wcc) == 1 if wcc else False
         conn_metrics["connected_components_count"] = len(wcc)
         conn_metrics["largest_component_size"] = max(len(c) for c in wcc) if wcc else 0
@@ -373,10 +388,10 @@ class ProcessingService:
             nodes.append({
                 "id": str(acct),
                 "label": str(acct),
-                "risk_score": round(score_data.get("score", 0.0), 2),
+                "risk_score": float(round(score_data.get("score", 0.0), 2)),
                 "flagged": "Yes" if is_suspicious else "No",
                 "pattern_type": primary_pattern,
-                "is_suspicious": is_suspicious,
+                "is_suspicious": bool(is_suspicious),
             })
 
         edges = []
