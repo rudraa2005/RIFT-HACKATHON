@@ -5,7 +5,7 @@ services:
     env: python
     region: singapore # Optional
     plan: free # Optional
-    buildCommand: pip install -r backend/requirements.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: cd backend && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:10000
     envVars:
       - key: PYTHON_VERSION
@@ -14,12 +14,11 @@ services:
         value: .
     autoDeploy: false
 
+staticSites:
   # Frontend Service
-  - type: web
-    name: graphlens-frontend
-    env: static
+  - name: graphlens-frontend
     buildCommand: cd frontend && npm install && npm run build
-    staticPublishPath: frontend/dist
+    publishDir: frontend/dist
     routes:
       - type: rewrite
         source: /*
@@ -27,3 +26,8 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 20.11.0
+      - key: VITE_API_BASE_URL
+        fromService:
+          type: web
+          name: graphlens-backend
+          property: url
