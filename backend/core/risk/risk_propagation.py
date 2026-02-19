@@ -24,7 +24,7 @@ _STRUCTURAL_PATTERNS = {
     "structured_fragmentation",
 }
 
-PROPAGATION_DECAY = 0.3
+PROPAGATION_DECAY = 0.35
 EXPOSURE_THRESHOLD = 15.0
 
 
@@ -70,7 +70,8 @@ def propagate_risk(
             boost = source_score * PROPAGATION_DECAY
             current = scores[neighbor]["score"]
             if boost > EXPOSURE_THRESHOLD and current < source_score:
-                scores[neighbor]["score"] = round(current + boost * 0.5, 2)
+                # Add full decay-weighted boost (0.3) instead of halving it
+                scores[neighbor]["score"] = round(min(100, current + boost), 2)
                 if "network_risk_exposure" not in scores[neighbor]["patterns"]:
                     scores[neighbor]["patterns"].append("network_risk_exposure")
 

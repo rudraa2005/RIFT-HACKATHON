@@ -286,17 +286,26 @@ class ProcessingService:
         # Deduplicate rings by member set
         # Deduplicate rings: exact match by member set
         seen_member_sets = {}
+        # Deduplicate rings: exact match by member set
+        # Prioritize pattern specificity over raw risk score
+        priority = {"cycle": 5, "fan_in": 4, "fan_out": 4, "shell_chain": 3, "deep_layered_cascade": 2}
+        
+        seen_member_sets: Dict[frozenset, Dict[str, Any]] = {}
         for ring in all_rings:
             key = frozenset(ring["members"])
-            if key not in seen_member_sets or ring["risk_score"] > seen_member_sets[key]["risk_score"]:
+            if key not in seen_member_sets:
                 seen_member_sets[key] = ring
+            else:
+                existing = seen_member_sets[key]
+                p_new = priority.get(ring.get("pattern_type", ""), 0)
+                p_ext = priority.get(existing.get("pattern_type", ""), 0)
+                if p_new > p_ext or (p_new == p_ext and ring["risk_score"] > existing["risk_score"]):
+                    seen_member_sets[key] = ring
         
         deduped_rings = list(seen_member_sets.values())
         # Collapse subset rings: if ring A ⊂ ring B, drop A
-        # We prioritize cycles > smurfing > shell
         final_rings = []
         # Sort by length descending, then by pattern priority
-        priority = {"cycle": 3, "fan_in": 2, "fan_out": 2, "shell_chain": 1}
         sorted_rings = sorted(
             deduped_rings, 
             key=lambda r: (len(r["members"]), priority.get(r.get("pattern_type", ""), 0)), 
@@ -458,16 +467,17 @@ class ProcessingService:
             all_ring_members.update(ring["members"])
 
         # 2. Apply structural bonuses for better ranking resolution
-        # Hierarchy: AGG > MULE > SMURF Sender
+        # Hierarchy: SMURF AGG > CYCLE > SHELL
         for acct in normalized:
             acc_patterns = set(normalized[acct].get("patterns", []))
             bonus = 0.0
-            if "smurfing_aggregator" in acc_patterns: bonus += 25.0
-            if "cycle" in acc_patterns: bonus += 15.0
-            if "shell_account" in acc_patterns: bonus += 15.0
-            if "smurfing_disperser" in acc_patterns: bonus += 15.0
+            if "smurfing_aggregator" in acc_patterns: bonus += 40.0
+            if "cycle" in acc_patterns: bonus += 35.0
+            if "smurfing_disperser" in acc_patterns: bonus += 20.0
+            if "shell_account" in acc_patterns: bonus += 10.0
             if "fan_in_participant" in acc_patterns: bonus += 5.0
-            if "deep_layered_cascade" in acc_patterns: bonus += 5.0
+            if "fan_out_participant" in acc_patterns: bonus += 5.0
+            if "deep_layered_cascade" in acc_patterns: bonus += 10.0
             
             normalized[acct]["score"] += bonus
 
@@ -595,29 +605,56 @@ class ProcessingService:
         nonzero_mask = raw_vals > 0
         nonzero_mask = raw_vals > 0
         if np.any(nonzero_mask):
-            # Using 'ordinal' method ensures meaningful differentiation 
-            # even for accounts with identical structural roles, 
-            # while the earlier bonus phase ensures AGG > MULE separation.
+            # 1. Ordinal ranking for stable differentiation
             ranks = rankdata(raw_vals[nonzero_mask], method='ordinal')
             num_suspicious = len(ranks)
-            percentiles = ranks / num_suspicious
+            percentiles = (ranks - 0.5) / num_suspicious  # Center percentiles
             
-            # Moderate non-linear spread (x^2.0) for better differentiation
-            final_percentiles = np.power(percentiles, 2.0) 
+            # 2. Sigmoid scaling to push mid-tier accounts away from clustering
+            # k=10 provides strong separation while keeping 0 and 1 boundaries reasonable
+            k = 10.0
+            sigmoid_percentiles = 1 / (1 + np.exp(-k * (percentiles - 0.5)))
+            
+            # 3. Min-Max scale the sigmoid back to [0, 1] to ensure range integrity
+            s_min = sigmoid_percentiles.min()
+            s_max = sigmoid_percentiles.max()
+            if s_max > s_min:
+                final_percentiles = (sigmoid_percentiles - s_min) / (s_max - s_min)
+            else:
+                final_percentiles = sigmoid_percentiles
+            
             scaled_scores = final_percentiles * 100.0
             
+            # Index of ring memberships for adaptive floor
+            account_ring_risk = {}
+            for ring in all_rings:
+                r_risk = float(ring.get("risk_score", 0))
+                for member in ring["members"]:
+                    m_str = str(member)
+                    account_ring_risk[m_str] = max(account_ring_risk.get(m_str, 0), r_risk)
+
             idx = 0
             for i, aid in enumerate(acct_ids):
                 if nonzero_mask[i]:
-                    new_score = round(float(scaled_scores[idx]), 2)
+                    new_score = float(scaled_scores[idx])
                     
-                    # ENFORCE RISK FLOOR FOR RING MEMBERS (Min 35.0)
+                    # 4. TOP-END COMPRESSION: Prevent broad 99.x saturation
+                    if new_score > 95.0:
+                        new_score = 95.0 + (new_score - 95.0) * 0.2
+                    
+                    # 5. PROPORTIONAL RISK INJECTION: Replace fixed floor clustering
+                    # Uses ring risk to inject a proportional baseline rather than a hard wall.
                     if aid in all_ring_members:
-                        new_score = max(new_score, 35.0)
+                        r_risk = account_ring_risk.get(aid, 0)
+                        # Inject 20% of ring risk as a baseline buffer (+ small jitter)
+                        proportional_boost = r_risk * 0.2
+                        jitter = (hash(aid) % 100) / 50.0 # 0 to 2 points of jitter
+                        new_score = max(new_score, proportional_boost + jitter)
                         
-                    normalized[aid]["score"] = new_score
+                    final_score = round(float(new_score), 2)
+                    normalized[aid]["score"] = final_score
                     # Also sync final_risk_score so format_output picks it up
-                    normalized[aid]["final_risk_score"] = round(new_score / 100.0, 4)
+                    normalized[aid]["final_risk_score"] = round(final_score / 100.0, 4)
                     idx += 1
                 else:
                     normalized[aid]["score"] = 0.0

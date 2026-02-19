@@ -110,25 +110,65 @@ def detect_shell_chains(
     G: nx.MultiDiGraph, df: pd.DataFrame, exclude_nodes: Set[str] | None = None
 ) -> Tuple[List[Dict[str, Any]], Set[str]]:
     """
-    Detect shell chain patterns.
-
-    Returns:
-        (rings_list, shell_account_ids_set)
+    Detect shell chain patterns with tightened constraints and deduplication.
     """
     shell_accounts = _identify_shell_accounts(G, df)
     if exclude_nodes:
         shell_accounts = shell_accounts - exclude_nodes
     chains = _find_shell_chains(G, shell_accounts)
 
+    # 1. PRE-FILTER CHAINS: Apply minimum flow and velocity constraints
+    filtered_chains = []
+    for chain in chains:
+        # Sum total amount flowing through the chain
+        chain_txns = df[(df["sender_id"].isin(chain)) & (df["receiver_id"].isin(chain))]
+        total_flow = chain_txns["amount"].sum()
+        
+        # Velocity check: transaction frequency
+        time_span = (chain_txns["timestamp"].max() - chain_txns["timestamp"].min()).total_seconds() / 3600
+        velocity = len(chain_txns) / max(1, time_span)
+        
+        # Thresholds: Min flow 1000, Min velocity 0.5 tx/hr (if span > 0)
+        if total_flow >= 1000 or (len(chain_txns) >= 3 and velocity >= 0.5):
+            filtered_chains.append(chain)
+
+    # Convert chains to sets for merging
+    raw_rings = []
+    for chain in filtered_chains:
+        raw_rings.append(set(chain))
+
+    # Jaccard-based merging (60% intersection)
+    merged_sets = []
+    for r_set in raw_rings:
+        is_merged = False
+        for i, m_set in enumerate(merged_sets):
+            intersection = r_set & m_set
+            if len(intersection) / min(len(r_set), len(m_set)) >= 0.6:
+                merged_sets[i] = m_set | r_set
+                is_merged = True
+                break
+        if not is_merged:
+            merged_sets.append(r_set)
+
     rings: List[Dict[str, Any]] = []
-    for i, chain in enumerate(chains, 1):
+    total_shell_members: Set[str] = set()
+    for i, m_set in enumerate(merged_sets, 1):
+        members = sorted(list(m_set))
+        total_shell_members.update(members)
+        
+        member_patterns = {
+            str(m): ["shell_chain_participant", "flow_chain_member"] 
+            for m in members
+        }
+        
         rings.append(
             {
                 "ring_id": f"RING_SHELL_{i:03d}",
-                "members": chain,
+                "members": members,
+                "member_patterns": member_patterns,
                 "pattern_type": "shell_chain",
-                "risk_score": round(min(100, 50 + len(chain) * 10), 2),
+                "risk_score": float(min(100, 30 + len(members) * 8)),
             }
         )
 
-    return rings, shell_accounts
+    return rings, total_shell_members
