@@ -1,11 +1,4 @@
-const getBaseUrl = () => {
-  let url = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-  if (!url.startsWith('http')) {
-    url = `https://${url}`
-  }
-  return url
-}
-const API_BASE_URL = getBaseUrl()
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 async function handleResponse(res) {
   if (!res.ok) {
@@ -44,4 +37,3 @@ export async function fetchMetrics() {
   const res = await fetch(`${API_BASE_URL}/metrics`)
   return handleResponse(res)
 }
-

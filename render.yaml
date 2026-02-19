@@ -1,12 +1,10 @@
 services:
-  # Backend Service
+  # Backend API (Python/FastAPI)
   - type: web
     name: graphlens-backend
     env: python
-    # region: singapore # Removed for compatibility
-    # plan: free # Removed for compatibility
     buildCommand: pip install -r requirements.txt
-    startCommand: cd backend && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:10000
+    startCommand: cd backend && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:$PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.9.0
@@ -14,7 +12,7 @@ services:
         value: .
     autoDeploy: false
 
-  # Frontend Service
+  # Frontend (React/Vite Static Site)
   - type: web
     name: graphlens-frontend
     env: static
@@ -28,7 +26,4 @@ services:
       - key: NODE_VERSION
         value: 20.11.0
       - key: VITE_API_BASE_URL
-        fromService:
-          type: web
-          name: graphlens-backend
-          property: host
+        value: https://graphlens-backend.onrender.com
