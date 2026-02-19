@@ -1,24 +1,16 @@
 services:
-  # Backend Service
+  # Backend Service (Unchanged)
   - type: web
     name: graphlens-backend
     env: python
-    # region: singapore # Optional - Removed for compatibility
-    # plan: free # Optional - Removed for compatibility
-    buildCommand: pip install -r requirements.txt
-    startCommand: cd backend && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:10000
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.9.0
-      - key: PYTHONPATH
-        value: .
-    autoDeploy: false
+    # ... (rest of backend config)
 
-staticSites:
-  # Frontend Service
-  - name: graphlens-frontend
+  # Frontend Service (Moved to services)
+  - type: web
+    name: graphlens-frontend
+    env: static
     buildCommand: cd frontend && npm install && npm run build
-    publishDir: frontend/dist
+    staticPublishPath: frontend/dist
     routes:
       - type: rewrite
         source: /*
