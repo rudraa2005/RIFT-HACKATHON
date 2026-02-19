@@ -7,6 +7,12 @@ Endpoints:
     GET  /metrics — Processing statistics
 """
 
+import sys
+import os
+
+# Add the parent directory (backend) to sys.path to resolve imports like 'api', 'services', etc.
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

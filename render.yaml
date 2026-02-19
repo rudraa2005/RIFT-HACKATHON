@@ -10,6 +10,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.9.0
+      - key: PYTHONPATH
+        value: .
     autoDeploy: false
 
   # Frontend Service
