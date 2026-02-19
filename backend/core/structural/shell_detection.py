@@ -164,10 +164,10 @@ def detect_shell_chains(
         rings.append(
             {
                 "ring_id": f"RING_SHELL_{i:03d}",
-                "member_accounts": members,
+                "members": members,
                 "member_patterns": member_patterns,
                 "pattern_type": "shell_chain",
-                "risk_score": round(min(100, 30 + len(members) * 8), 2),
+                "risk_score": float(min(100, 30 + len(members) * 8)),
             }
         )
 
