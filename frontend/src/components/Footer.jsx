@@ -23,6 +23,7 @@ export default function Footer() {
                             <li><Link to="/fraud-rings" className="text-xs text-[rgb(107,107,107)] hover:text-white transition-colors">Fraud Rings</Link></li>
                             <li><Link to="/analytics" className="text-xs text-[rgb(107,107,107)] hover:text-white transition-colors">Analytics</Link></li>
                             <li><Link to="/reports" className="text-xs text-[rgb(107,107,107)] hover:text-white transition-colors">Reports</Link></li>
+                            <li><Link to="/history" className="text-xs text-[rgb(107,107,107)] hover:text-white transition-colors">History</Link></li>
                         </ul>
                     </div>
                     <div>

@@ -1,6 +1,7 @@
 import Navbar from '../components/Navbar'
 import { useAnalysis } from '../context/AnalysisContext'
 import { useNavigate } from 'react-router-dom'
+import { buildStrictExportPayload } from '../utils/jsonExport'
 
 function deriveRiskBand(score) {
   if (score >= 85) return 'Critical'
@@ -9,20 +10,65 @@ function deriveRiskBand(score) {
   return 'Watch'
 }
 
+function inferCurrencySymbol(analysis) {
+  const explicit =
+    analysis?.summary?.currency_symbol ||
+    analysis?.currency_symbol ||
+    analysis?.meta?.currency_symbol
+  const symbol = typeof explicit === 'string' ? explicit.trim() : ''
+  return symbol && symbol !== '?' ? symbol : '?'
+}
+
+function formatAmount(value, currencySymbol = '') {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '--'
+  const formatted = num.toLocaleString(undefined, { maximumFractionDigits: 2 })
+  const prefix = (!currencySymbol || currencySymbol.includes('?') || /[^\x00-\x7F]/.test(currencySymbol)) ? 'INR ' : currencySymbol
+  return `${prefix}${formatted}`
+}
+
+function computeTotalFlaggedVolume(analysis) {
+  if (!analysis) return null
+
+  const suspiciousIds = new Set((analysis.suspicious_accounts || []).map((a) => String(a.account_id)))
+  const edges = analysis?.graph_data?.edges || []
+
+  if (suspiciousIds.size > 0 && edges.length > 0) {
+    let total = 0
+    for (const edge of edges) {
+      const source = String(edge?.source ?? '')
+      const target = String(edge?.target ?? '')
+      if (!suspiciousIds.has(source) && !suspiciousIds.has(target)) continue
+      const amount = Number(edge?.amount)
+      if (Number.isFinite(amount)) total += amount
+    }
+    return total
+  }
+
+  let fallback = 0
+  for (const account of analysis.suspicious_accounts || []) {
+    const amt = Number(account?.score_breakdown?.total_amount)
+    if (Number.isFinite(amt)) fallback += amt
+  }
+  return fallback > 0 ? fallback : null
+}
+
 export default function Reports() {
   const { analysis } = useAnalysis()
   const navigate = useNavigate()
+  const currencySymbol = inferCurrencySymbol(analysis)
+  const totalFlaggedVolume = computeTotalFlaggedVolume(analysis)
 
   const suspiciousAccounts = analysis?.suspicious_accounts ?? []
   const accounts = suspiciousAccounts.length
     ? suspiciousAccounts.map((a) => {
         const type = deriveRiskBand(a.suspicion_score)
-        const volume = a.score_breakdown?.total_amount
-          ? `$${Number(a.score_breakdown.total_amount).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-          : '—'
+        const volume = Number.isFinite(Number(a.score_breakdown?.total_amount))
+          ? formatAmount(a.score_breakdown.total_amount, currencySymbol)
+          : '--'
         const lastEvent = (a.risk_timeline || []).slice(-1)[0]
         const date = lastEvent?.timestamp ? new Date(lastEvent.timestamp).toLocaleDateString() : 'N/A'
-        const time = lastEvent?.timestamp ? new Date(lastEvent.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'
+        const time = lastEvent?.timestamp ? new Date(lastEvent.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--'
         return {
           id: a.account_id,
           initials: a.account_id.slice(0, 2).toUpperCase(),
@@ -72,7 +118,8 @@ export default function Reports() {
             {analysis && (
               <button
                 onClick={() => {
-                  const blob = new Blob([JSON.stringify(analysis, null, 2)], { type: 'application/json' })
+                  const strictPayload = buildStrictExportPayload(analysis)
+                  const blob = new Blob([JSON.stringify(strictPayload, null, 2)], { type: 'application/json' })
                   const url = URL.createObjectURL(blob)
                   const a = document.createElement('a')
                   a.href = url
@@ -90,17 +137,17 @@ export default function Reports() {
             )}
             <button
               onClick={() => {
-                const headers = ["Account ID", "Initials", "Score", "Type", "Ring", "Volume", "Date", "Time"];
-                const csvContent = "data:text/csv;charset=utf-8,"
-                  + headers.join(",") + "\n"
-                  + accounts.map(e => [e.id, e.initials, e.score, e.type, e.ring, e.volume.replace(/,/g, ''), e.date, e.time].join(",")).join("\n");
-                const encodedUri = encodeURI(csvContent);
-                const link = document.createElement("a");
-                link.setAttribute("href", encodedUri);
-                link.setAttribute("download", "fraud_report.csv");
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
+                const headers = ['Account ID', 'Initials', 'Score', 'Type', 'Ring', 'Volume', 'Date', 'Time']
+                const csvContent = 'data:text/csv;charset=utf-8,'
+                  + headers.join(',') + '\n'
+                  + accounts.map(e => [e.id, e.initials, e.score, e.type, e.ring, e.volume.replace(/,/g, ''), e.date, e.time].join(',')).join('\n')
+                const encodedUri = encodeURI(csvContent)
+                const link = document.createElement('a')
+                link.setAttribute('href', encodedUri)
+                link.setAttribute('download', 'fraud_report.csv')
+                document.body.appendChild(link)
+                link.click()
+                link.remove()
               }}
               className="flex items-center gap-2 px-6 py-3 rounded-xl bg-white text-black hover:bg-neutral-200 transition-all text-xs font-bold shadow-lg shadow-white/5 font-body">
               <span className="material-symbols-outlined text-[18px]">download</span>
@@ -113,11 +160,11 @@ export default function Reports() {
           <div className="p-6 rounded-3xl border border-white/5 bg-card-dark hover:border-accent-blue/30 transition-colors group">
             <p className="text-text-muted text-[11px] font-bold uppercase tracking-widest mb-2 font-body">Total Flagged Volume</p>
             <p className="text-4xl font-medium text-white tracking-tight font-display">
-              {analysis?.summary?.total_flagged_volume
-                ? `$${Number(analysis.summary.total_flagged_volume).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+              {analysis
+                ? (totalFlaggedVolume !== null ? formatAmount(totalFlaggedVolume, currencySymbol) : '--')
                 : '$4.2M'}
               <span className="text-xs font-bold text-accent-blue ml-2 bg-accent-blue/10 px-1.5 py-0.5 rounded font-body">
-                ▲
+                Live
               </span>
             </p>
           </div>
@@ -209,7 +256,7 @@ export default function Reports() {
                       {account.volume}
                     </td>
                     <td className="py-4 px-6 text-text-muted text-xs font-body">
-                      {account.date} <span className="text-white/20 px-1">•</span> {account.time}
+                      {account.date} <span className="text-white/20 px-1">�</span> {account.time}
                     </td>
                     <td className="py-4 px-6 text-right">
                       <button className="text-text-muted hover:text-white transition-colors p-2 rounded hover:bg-white/5">
@@ -249,3 +296,8 @@ export default function Reports() {
     </div >
   )
 }
+
+
+
+
+

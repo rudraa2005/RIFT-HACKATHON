@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { useSearchParams, Link } from 'react-router-dom'
+import { useSearchParams, Link, useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import { useAnalysis } from '../context/AnalysisContext'
 
@@ -31,18 +31,10 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
       })
     })
 
-    // Decide which accounts to include:
-    // By default, only show risky clusters (members of fraud rings or suspicious accounts)
-    // to reduce overcrowding.
-    const riskyIds = new Set()
-    fraudRings.forEach(r => r.member_accounts.forEach(m => riskyIds.add(String(m))))
-    suspiciousList.forEach(s => riskyIds.add(String(s.account_id)))
-
-    let allowedAccounts = new Set(riskyIds)
-    if (highlightRing) {
-      const ring = fraudRings.find(r => r.ring_id === highlightRing)
-      if (ring) allowedAccounts = new Set(ring.member_accounts.map(m => String(m)))
-    }
+    const suspicionByAccount = new Map()
+    suspiciousList.forEach((s) => {
+      suspicionByAccount.set(String(s.account_id), Number(s.suspicion_score) || 0)
+    })
 
     // Build adjacency for account-level navigation
     analysis.graph_data.edges.forEach((edge) => {
@@ -54,24 +46,93 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
       adjacency.get(v).add(u)
     })
 
-    // If focusing on a specific account, override allowedAccounts with its connected component.
-    if (accountFocus) {
+    // Keep graph clean by default: prioritize top-risk rings + top-risk accounts.
+    let allowedAccounts = new Set()
+    let highlightedRingMembers = []
+    if (highlightRing) {
+      const ring = fraudRings.find(r => r.ring_id === highlightRing)
+      if (ring) {
+        highlightedRingMembers = ring.member_accounts.map(m => String(m))
+        allowedAccounts = new Set(highlightedRingMembers)
+      }
+    } else if (fraudRings.length > 0) {
+      const topRings = [...fraudRings]
+        .sort((a, b) => (Number(b.risk_score) || 0) - (Number(a.risk_score) || 0))
+        .slice(0, 5)
+      topRings.forEach((r) => r.member_accounts.forEach((m) => allowedAccounts.add(String(m))))
+
+      const topSuspicious = [...suspiciousList]
+        .sort((a, b) => (Number(b.suspicion_score) || 0) - (Number(a.suspicion_score) || 0))
+        .slice(0, 25)
+      topSuspicious.forEach((s) => allowedAccounts.add(String(s.account_id)))
+    } else {
+      const topSuspicious = [...suspiciousList]
+        .sort((a, b) => (Number(b.suspicion_score) || 0) - (Number(a.suspicion_score) || 0))
+        .slice(0, 35)
+      topSuspicious.forEach((s) => allowedAccounts.add(String(s.account_id)))
+    }
+
+    // If focusing on a specific account, override allowedAccounts with a compact local neighborhood.
+    if (accountFocus && !highlightRing) {
       const start = String(accountFocus)
       const visited = new Set([start])
       const queue = [start]
-      while (queue.length) {
+      while (queue.length && visited.size < 35) {
         const cur = queue.shift()
         const nbrs = adjacency.get(cur)
         if (!nbrs) continue
-        for (const n of nbrs) {
+        const sortedNbrs = [...nbrs].sort(
+          (a, b) => (suspicionByAccount.get(b) || 0) - (suspicionByAccount.get(a) || 0),
+        )
+        for (const n of sortedNbrs) {
           if (!visited.has(n)) {
             visited.add(n)
             queue.push(n)
+            if (visited.size >= 35) break
           }
         }
       }
       allowedAccounts = visited
     }
+
+    if (highlightRing && accountFocus) {
+      // Keep preview mode strict: ring-only graph with focused account highlighted.
+      allowedAccounts.add(String(accountFocus))
+    }
+
+    // Hard cap to prevent visual overload on very large uploads.
+    if (allowedAccounts.size > 70) {
+      const ranked = [...allowedAccounts].sort(
+        (a, b) => (suspicionByAccount.get(b) || 0) - (suspicionByAccount.get(a) || 0),
+      )
+      allowedAccounts = new Set(ranked.slice(0, 70))
+    }
+
+    // Build one representative transaction per account so node tooltips/panels
+    // always have consistent transaction metadata.
+    const txByAccount = new Map()
+    analysis.graph_data.edges.forEach((edge) => {
+      const fromId = String(edge.source)
+      const toId = String(edge.target)
+      if (allowedAccounts.size && (!allowedAccounts.has(fromId) || !allowedAccounts.has(toId))) return
+
+      const tx = {
+        transaction_id: edge.transaction_id || 'N/A',
+        amount: typeof edge.amount === 'number' ? `$${edge.amount.toLocaleString()}` : String(edge.amount || 'N/A'),
+        timestamp: edge.timestamp || 'N/A',
+        ts: Number.isFinite(new Date(edge.timestamp).getTime()) ? new Date(edge.timestamp).getTime() : -1,
+      }
+
+      const setIfBetter = (accountId) => {
+        const prev = txByAccount.get(accountId)
+        if (!prev || tx.ts > prev.ts) {
+          txByAccount.set(accountId, tx)
+        }
+      }
+
+      setIfBetter(fromId)
+      setIfBetter(toId)
+    })
 
     analysis.graph_data.nodes.forEach((node) => {
       const id = String(node.id)
@@ -103,6 +164,7 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
           ringScore,
           isSuspicious,
           suspicionScore,
+          txMeta: txByAccount.get(id) || null,
         })
         allNodes.push(nodeMap.get(id))
       }
@@ -129,13 +191,62 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
         transaction_id: edge.transaction_id,
       })
 
-      // Attach one representative transaction to the target node for tooltip display.
-      if (!to.txnId && edge.transaction_id) {
+      // Backfill from edge if tx metadata is still missing.
+      if ((!to.txnId || to.txnId === 'N/A') && edge.transaction_id) {
         to.txnId = edge.transaction_id
-        to.amount = typeof edge.amount === 'number' ? `$${edge.amount.toLocaleString()}` : String(edge.amount || '')
-        to.timestamp = edge.timestamp || ''
+        to.amount = typeof edge.amount === 'number' ? `$${edge.amount.toLocaleString()}` : String(edge.amount || 'N/A')
+        to.timestamp = edge.timestamp || 'N/A'
+      }
+      if ((!from.txnId || from.txnId === 'N/A') && edge.transaction_id) {
+        from.txnId = edge.transaction_id
+        from.amount = typeof edge.amount === 'number' ? `$${edge.amount.toLocaleString()}` : String(edge.amount || 'N/A')
+        from.timestamp = edge.timestamp || 'N/A'
       }
     })
+
+    // In ring preview mode, keep the graph focused: only show a compact cycle among ring members.
+    if (highlightRing && allowedAccounts.size > 1) {
+      const orderedMembers = highlightedRingMembers.length
+        ? highlightedRingMembers.filter((id) => allowedAccounts.has(id))
+        : [...allowedAccounts].sort(
+          (a, b) => (suspicionByAccount.get(b) || 0) - (suspicionByAccount.get(a) || 0),
+        )
+      const edgeByPair = new Map()
+      allEdges.forEach((e) => {
+        edgeByPair.set(`${e.from}->${e.to}`, e)
+      })
+
+      const cycleEdges = []
+      for (let i = 0; i < orderedMembers.length; i++) {
+        const from = orderedMembers[i]
+        const to = orderedMembers[(i + 1) % orderedMembers.length]
+        const direct = edgeByPair.get(`${from}->${to}`)
+        const reverse = edgeByPair.get(`${to}->${from}`)
+        const chosen = direct || reverse
+        cycleEdges.push({
+          from,
+          to,
+          suspicious: true,
+          ringId: highlightRing,
+          amount: chosen?.amount ?? 0,
+          timestamp: chosen?.timestamp ?? '',
+          transaction_id: chosen?.transaction_id ?? '',
+        })
+      }
+
+      allEdges.length = 0
+      allEdges.push(...cycleEdges)
+    }
+
+    if (allEdges.length > 200) {
+      allEdges.sort((a, b) => {
+        const aRank = (a.suspicious ? 2 : 0) + (a.ringId ? 1 : 0)
+        const bRank = (b.suspicious ? 2 : 0) + (b.ringId ? 1 : 0)
+        if (bRank !== aRank) return bRank - aRank
+        return (Number(b.amount) || 0) - (Number(a.amount) || 0)
+      })
+      allEdges.splice(200)
+    }
 
     return { allNodes, allEdges }
   }
@@ -154,10 +265,13 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
 }
 
 export default function NetworkGraph() {
+  const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const highlightRing = searchParams.get('ring')
   const accountFocus = searchParams.get('account')
   const { analysis } = useAnalysis()
+  const focusedAccountId = accountFocus ? String(accountFocus) : null
+  const investigateMode = Boolean(highlightRing || accountFocus)
 
   const canvasRef = useRef(null)
   const animRef = useRef(null)
@@ -175,6 +289,7 @@ export default function NetworkGraph() {
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 })
   const [selectedNode, setSelectedNode] = useState(null)
   const [zoomLevel, setZoomLevel] = useState(100)
+  const [visibleAccountIds, setVisibleAccountIds] = useState([])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -186,6 +301,13 @@ export default function NetworkGraph() {
     const { allNodes, allEdges } = buildGraphData(analysis, highlightRing, accountFocus)
     const cx = w / 2, cy = h / 2
     const ringIds = [...new Set(allNodes.filter(n => n.ringId).map(n => n.ringId))]
+    const highlightedRing = highlightRing
+      ? (analysis?.fraud_rings || []).find((r) => r.ring_id === highlightRing)
+      : null
+    const ringMembers = highlightRing
+      ? (highlightedRing?.member_accounts || allNodes.filter((n) => n.ringId === highlightRing).map((n) => n.globalId)).map(String)
+      : []
+    const ringIndex = new Map(ringMembers.map((id, idx) => [id, idx]))
     const clusterPositions = {}
     ringIds.forEach((rid, i) => {
       const angle = (i / ringIds.length) * Math.PI * 2 - Math.PI / 2
@@ -197,7 +319,14 @@ export default function NetworkGraph() {
 
     nodesRef.current = allNodes.map((node) => {
       let startX, startY
-      if (node.ringId && clusterPositions[node.ringId]) {
+      if (highlightRing && node.ringId === highlightRing) {
+        const idx = ringIndex.get(node.globalId) ?? 0
+        const count = Math.max(1, ringMembers.length)
+        const angle = (idx / count) * Math.PI * 2 - Math.PI / 2
+        const radius = Math.min(w, h) * 0.31
+        startX = cx + Math.cos(angle) * radius
+        startY = cy + Math.sin(angle) * radius
+      } else if (node.ringId && clusterPositions[node.ringId]) {
         const cp = clusterPositions[node.ringId]
         const a = Math.random() * Math.PI * 2
         startX = cp.x + Math.cos(a) * (30 + Math.random() * 60)
@@ -206,9 +335,49 @@ export default function NetworkGraph() {
         startX = cx + (Math.random() - 0.5) * w * 0.8
         startY = cy + (Math.random() - 0.5) * h * 0.8
       }
-      return { ...node, x: startX, y: startY, vx: 0, vy: 0, targetX: startX, targetY: startY, isHighlighted: highlightRing && node.ringId === highlightRing }
+      return {
+        ...node,
+        x: startX,
+        y: startY,
+        vx: 0,
+        vy: 0,
+        targetX: startX,
+        targetY: startY,
+        isHighlighted: highlightRing && node.ringId === highlightRing,
+        isFocused: focusedAccountId ? node.globalId === focusedAccountId : false,
+        txnId: node.txMeta?.transaction_id || node.txnId || 'N/A',
+        amount: node.txMeta?.amount || node.amount || 'N/A',
+        timestamp: node.txMeta?.timestamp || node.timestamp || 'N/A',
+      }
     })
     edgesRef.current = allEdges.map(e => ({ ...e, dashOffset: 0 }))
+    setVisibleAccountIds(
+      allNodes
+        .map((n) => String(n.globalId))
+        .sort((a, b) => a.localeCompare(b)),
+    )
+
+    if (focusedAccountId) {
+      const focusedNode = nodesRef.current.find((n) => n.globalId === focusedAccountId)
+      if (focusedNode) {
+        zoomRef.current = 1.15
+        setZoomLevel(115)
+        setSelectedNode(focusedNode)
+        panRef.current = {
+          x: w / 2 - focusedNode.x * zoomRef.current,
+          y: h / 2 - focusedNode.y * zoomRef.current,
+        }
+      } else {
+        setSelectedNode(null)
+      }
+    } else {
+      setSelectedNode(null)
+      if (highlightRing) {
+        zoomRef.current = 1.16
+        setZoomLevel(116)
+        panRef.current = { x: 0, y: 0 }
+      }
+    }
   }, [highlightRing, accountFocus, analysis])
 
   useEffect(() => {
@@ -222,14 +391,18 @@ export default function NetworkGraph() {
       const zoom = zoomRef.current, pan = panRef.current
       ctx.setTransform(2, 0, 0, 2, 0, 0)
       ctx.clearRect(0, 0, w, h)
-      ctx.fillStyle = 'rgb(25,25,25)'; ctx.fillRect(0, 0, w, h)
+      const bg = ctx.createRadialGradient(w * 0.5, h * 0.45, 20, w * 0.5, h * 0.45, Math.max(w, h) * 0.75)
+      bg.addColorStop(0, 'rgb(30,30,30)')
+      bg.addColorStop(1, 'rgb(17,17,17)')
+      ctx.fillStyle = bg
+      ctx.fillRect(0, 0, w, h)
 
       ctx.save()
       ctx.translate(pan.x, pan.y)
       ctx.scale(zoom, zoom)
 
       // Dotted Grid - Enhanced Visibility
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)' // Brighter for clear design
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.09)'
       const gs = 50 // Grid size
       const sx = Math.floor(-pan.x / zoom / gs) * gs - gs
       const sy = Math.floor(-pan.y / zoom / gs) * gs - gs
@@ -246,10 +419,12 @@ export default function NetworkGraph() {
       for (let i = 0; i < nodes.length; i++) {
         const n = nodes[i]
         if (dragging === n) continue
-        n.vx += (n.targetX - n.x) * 0.008
-        n.vy += (n.targetY - n.y) * 0.008
-        n.vx += Math.sin(Date.now() * 0.0005 + i * 1.7) * 0.04
-        n.vy += Math.cos(Date.now() * 0.0006 + i * 2.3) * 0.03
+        n.vx += (n.targetX - n.x) * (highlightRing ? 0.02 : 0.008)
+        n.vy += (n.targetY - n.y) * (highlightRing ? 0.02 : 0.008)
+        if (!highlightRing) {
+          n.vx += Math.sin(Date.now() * 0.0005 + i * 1.7) * 0.04
+          n.vy += Math.cos(Date.now() * 0.0006 + i * 2.3) * 0.03
+        }
         for (const edge of edges) {
           let other = null
           if (edge.from === n.globalId) other = getNode(edge.to)
@@ -279,6 +454,7 @@ export default function NetworkGraph() {
         if (!from || !to) continue
         const isRing = edge.ringId === highlightRing
         const isHov = hovered && (hovered.globalId === edge.from || hovered.globalId === edge.to)
+        const isFocusedEdge = focusedAccountId && (edge.from === focusedAccountId || edge.to === focusedAccountId)
 
         // Draw Edge
         ctx.beginPath()
@@ -287,12 +463,20 @@ export default function NetworkGraph() {
 
         // Monochrome Edge Styling
         const isSuspicious = edge.suspicious
-        if (isSuspicious || isRing) {
+        if (isFocusedEdge) {
+          ctx.strokeStyle = isHov ? '#bfdbfe' : 'rgba(96, 165, 250, 0.95)'
+          ctx.lineWidth = (isHov ? 3.4 : 2.4) / zoom
+          ctx.setLineDash([6 / zoom, 4 / zoom])
+        } else if (isRing) {
+          ctx.strokeStyle = isHov ? '#93c5fd' : 'rgba(59, 130, 246, 0.85)'
+          ctx.lineWidth = (isHov ? 3 : 2.2) / zoom
+          ctx.setLineDash([])
+        } else if (isSuspicious || isRing) {
           ctx.strokeStyle = isHov ? '#ffffff' : 'rgba(255, 255, 255, 0.9)' // Pure White for highlighted/risk
           ctx.lineWidth = (isHov ? 3 : 2) / zoom
           ctx.setLineDash([5 / zoom, 5 / zoom])
         } else {
-          ctx.strokeStyle = isHov ? '#ffffff' : 'rgba(255, 255, 255, 0.15)' // Faint White for others
+          ctx.strokeStyle = isHov ? '#ffffff' : 'rgba(255, 255, 255, 0.10)'
           ctx.lineWidth = (isHov ? 2 : 1) / zoom
           ctx.setLineDash([])
         }
@@ -300,7 +484,7 @@ export default function NetworkGraph() {
         ctx.stroke()
 
         // Draw Arrow
-        if (isSuspicious || isHov || isRing || zoom > 1.2) {
+        if (isSuspicious || isHov || isRing || isFocusedEdge || zoom > 1.2) {
           const angle = Math.atan2(to.y - from.y, to.x - from.x)
           const headLen = (isHov ? 12 : 8) / zoom
           const r = (to.r * 2.5) + (isHov ? 5 : 0) + (2 / zoom)
@@ -323,18 +507,21 @@ export default function NetworkGraph() {
         const isHov = hovered?.globalId === n.globalId
         const isSel = selectedNode?.globalId === n.globalId
         const isHL = n.isHighlighted // Belongs to the searched ring
+        const isFocused = !!n.isFocused
 
         // size and opacity
         const baseR = n.r * 2.8
-        let drawR = baseR * (isHov ? 1.3 : 1) / zoom
+        let drawR = baseR * (isHov || isFocused ? 1.35 : 1) / zoom
 
-        const isDimmed = highlightRing && !isHL && !isHov && !isSel
+        const isDimmed = highlightRing && !isHL && !isHov && !isSel && !isFocused
         const isSuspicious = n.isSuspicious || n.suspicionScore > 50
 
         // 1. Draw Glow (Red for high risk, White for regular interaction)
-        if (!isDimmed && (isHov || isHL || isSel || isSuspicious)) {
+        if (!isDimmed && (isHov || isHL || isSel || isSuspicious || isFocused)) {
           ctx.beginPath(); ctx.arc(n.x, n.y, drawR + (isHov ? 12 : 8) / zoom, 0, Math.PI * 2)
-          if (n.role === 'High Risk') {
+          if (isFocused) {
+            ctx.fillStyle = `rgba(59, 130, 246, ${isHov ? 0.5 : 0.3})`
+          } else if (n.role === 'High Risk') {
             ctx.fillStyle = `rgba(239, 68, 68, ${isHov ? 0.4 : 0.25})`;
           } else if (n.role === 'Suspicious') {
             ctx.fillStyle = `rgba(245, 158, 11, ${isHov ? 0.4 : 0.25})`;
@@ -342,6 +529,14 @@ export default function NetworkGraph() {
             ctx.fillStyle = `rgba(255, 255, 255, ${isHov ? 0.6 : 0.2})`;
           }
           ctx.fill()
+        }
+
+        if (isFocused) {
+          ctx.beginPath()
+          ctx.arc(n.x, n.y, drawR + 7 / zoom, 0, Math.PI * 2)
+          ctx.strokeStyle = 'rgba(96, 165, 250, 0.95)'
+          ctx.lineWidth = 2.2 / zoom
+          ctx.stroke()
         }
 
         // 2. Main Circle Body -> Black or Color tint
@@ -357,6 +552,8 @@ export default function NetworkGraph() {
 
         if (isDimmed) {
           grad.addColorStop(0, '#333'); grad.addColorStop(1, '#111')
+        } else if (isFocused) {
+          grad.addColorStop(0, '#60a5fa'); grad.addColorStop(1, '#1d4ed8')
         } else if (isHL || isHov || isSel) {
           grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#aaaaaa')
         } else if (isSuspicious) {
@@ -366,17 +563,20 @@ export default function NetworkGraph() {
         }
 
         ctx.strokeStyle = grad
-        ctx.lineWidth = (isHov || isHL || isSuspicious ? 3.0 : 1.0) / zoom
+        ctx.lineWidth = (isHov || isHL || isSuspicious || isFocused ? 3.0 : 1.0) / zoom
         ctx.globalAlpha = isDimmed ? 0.35 : 1
         ctx.stroke()
         ctx.globalAlpha = 1
 
         // Label
-        if (!isDimmed && ((baseR >= 9 && zoom >= 0.5) || isHov || isHL)) {
-          ctx.fillStyle = isHov || isHL ? '#fff' : '#666' // Dimmer labels by default
-          ctx.font = `600 ${(isHov ? 10 : 8) / zoom}px 'JetBrains Mono', monospace`
+        const showLabel = investigateMode || (isSuspicious && zoom >= 0.55) || isHov || isHL || isFocused
+        if (!isDimmed && showLabel) {
+          ctx.fillStyle = isHov || isHL || isFocused ? '#fff' : '#666'
+          ctx.font = `600 ${(isHov ? 10 : 7.5) / zoom}px 'JetBrains Mono', monospace`
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-          ctx.fillText(n.label.split('-').pop(), n.x, n.y)
+          const fullLabel = String(n.label)
+          const labelText = isHov || isFocused ? fullLabel : (fullLabel.length > 10 ? `${fullLabel.slice(0, 10)}...` : fullLabel)
+          ctx.fillText(labelText, n.x, n.y)
         }
       }
 
@@ -385,7 +585,7 @@ export default function NetworkGraph() {
     }
     animRef.current = requestAnimationFrame(tick)
     return () => { if (animRef.current) cancelAnimationFrame(animRef.current) }
-  }, [highlightRing, selectedNode])
+  }, [highlightRing, selectedNode, focusedAccountId, investigateMode])
 
   const screenToWorld = useCallback((sx, sy) => ({
     x: (sx - panRef.current.x) / zoomRef.current,
@@ -460,7 +660,9 @@ export default function NetworkGraph() {
     return () => c.removeEventListener('wheel', handleWheel)
   }, [handleWheel])
 
-  const highlightedRingData = highlightRing ? fraudRingsData.find(r => r.id === highlightRing) : null
+  const highlightedRingData = highlightRing
+    ? (analysis?.fraud_rings || []).find((r) => r.ring_id === highlightRing)
+    : null
 
   return (
     <div className="bg-[rgb(25,25,25)] text-[rgb(200,200,200)] font-display overflow-hidden h-screen flex flex-col relative">
@@ -469,11 +671,48 @@ export default function NetworkGraph() {
         {highlightedRingData && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 liquid-glass px-5 py-2.5 rounded-full flex items-center gap-3">
             <span className="size-1.5 rounded-full bg-primary animate-pulse"></span>
-            <span className="text-xs font-semibold text-white">Investigating #{highlightedRingData.id}</span>
-            <span className="text-[10px] text-neutral-500">• {highlightedRingData.type} •</span>
-            <span className="text-[10px] font-semibold text-neutral-300">Score: {highlightedRingData.score}</span>
+            <span className="text-xs font-semibold text-white">Investigating #{highlightedRingData.ring_id}</span>
+            <span className="text-[10px] text-neutral-500">• {highlightedRingData.pattern_type} •</span>
+            <span className="text-[10px] font-semibold text-neutral-300">Score: {Math.round(Number(highlightedRingData.risk_score) || 0)}</span>
             <Link to="/fraud-rings" className="text-[10px] text-neutral-400 hover:text-white transition-colors font-semibold ml-1">← Back</Link>
           </div>
+        )}
+
+        {focusedAccountId && (
+          <div className="absolute top-4 right-6 z-30 px-4 py-2 rounded-full bg-blue-500/10 border border-blue-500/30 text-[11px] text-blue-200 font-medium">
+            Focused account: <span className="font-technical text-white">{focusedAccountId}</span>
+          </div>
+        )}
+
+        {investigateMode && (
+          <aside className="absolute top-14 right-6 z-30 w-[260px] max-h-[55vh] overflow-hidden rounded-2xl border border-white/10 bg-[rgba(12,12,12,0.88)] backdrop-blur-sm">
+            <div className="px-4 py-3 border-b border-white/10">
+              <p className="text-[10px] uppercase tracking-widest text-neutral-400 font-semibold">Connected IDs</p>
+              <p className="text-[11px] text-neutral-300 mt-1">{visibleAccountIds.length} accounts</p>
+            </div>
+            <div className="max-h-[45vh] overflow-y-auto px-3 py-2">
+              {visibleAccountIds.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() =>
+                    navigate(
+                      `/network-graph?account=${encodeURIComponent(id)}${
+                        highlightRing ? `&ring=${encodeURIComponent(highlightRing)}` : ''
+                      }`,
+                    )
+                  }
+                  className={`w-full text-left px-2.5 py-1.5 rounded-md font-technical text-[11px] transition-colors ${
+                    id === focusedAccountId
+                      ? 'bg-blue-500/20 text-white border border-blue-500/40'
+                      : 'text-neutral-300 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  {id}
+                </button>
+              ))}
+            </div>
+          </aside>
         )}
 
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{ cursor: 'grab' }}
@@ -524,20 +763,21 @@ export default function NetworkGraph() {
                   ['Transaction ID', selectedNode.txnId],
                   ['Amount', selectedNode.amount],
                   ['Timestamp', selectedNode.timestamp],
+                  ['Suspicion Score', Number.isFinite(Number(selectedNode.suspicionScore)) ? `${Math.round(Number(selectedNode.suspicionScore))}/100` : 'N/A'],
                 ].map(([label, val]) => (
                   <div key={label} className="flex justify-between text-xs">
                     <span className="text-neutral-500">{label}</span>
                     <span className="text-white font-technical">{val}</span>
                   </div>
                 ))}
-                {selectedNode.ringScore && (
-                  <div className="pt-3 mt-2 border-t border-[rgb(36,36,36)]">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-neutral-500">Ring Risk Score</span>
-                      <span className="text-primary font-bold text-sm">{selectedNode.ringScore}</span>
-                    </div>
+                <div className="pt-3 mt-2 border-t border-[rgb(36,36,36)]">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-neutral-500">Ring Risk Score</span>
+                    <span className="text-primary font-bold text-sm">
+                      {Number.isFinite(Number(selectedNode.ringScore)) ? Number(selectedNode.ringScore).toFixed(2) : 'N/A'}
+                    </span>
                   </div>
-                )}
+                </div>
               </div>
             </div>
           </aside>

@@ -306,3 +306,27 @@ docker run -p 8000:8000 crime-detection
 ## 📜 License
 
 MIT
+
+---
+
+## Local Full-Stack Dev (Frontend + Backend)
+
+From the repository root (`RIFT-HACKATHON`), run:
+
+```bash
+# 1) Install Python dependencies
+pip install -r requirements.txt
+
+# 2) Install frontend dependencies
+npm --prefix frontend install
+
+# 3) Install root dev runner dependency
+npm install
+
+# 4) Start backend (8000) and frontend (5173) together
+npm run dev
+```
+
+Local URLs:
+- Frontend: `http://localhost:5173`
+- Backend API: `http://localhost:8000`

@@ -38,3 +38,13 @@ export async function fetchMetrics() {
   return handleResponse(res)
 }
 
+export async function fetchHistory() {
+  const res = await fetch(`${API_BASE_URL}/history`)
+  return handleResponse(res)
+}
+
+export async function fetchHistoryReport(runId) {
+  const res = await fetch(`${API_BASE_URL}/history/${encodeURIComponent(runId)}`)
+  return handleResponse(res)
+}
+

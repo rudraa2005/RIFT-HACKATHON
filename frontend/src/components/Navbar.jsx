@@ -21,6 +21,7 @@ export default function Navbar() {
             { to: '/fraud-rings', label: 'Fraud Rings' },
             { to: '/reports', label: 'Reports' },
             { to: '/analytics', label: 'Analytics' },
+            { to: '/history', label: 'History' },
           ].map(({ to, label }) => (
             <Link key={to} to={to}
               className={`px-4 py-2 rounded-lg text-xs font-bold transition-all duration-200 ${isActive(to)

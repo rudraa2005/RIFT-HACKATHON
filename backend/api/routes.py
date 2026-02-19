@@ -12,11 +12,13 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 from services.processing_pipeline import ProcessingService
+from utils.history_store import HistoryStore
 from utils.metrics import MetricsTracker
 from utils.validators import validate_csv
 
 router = APIRouter()
 metrics_tracker = MetricsTracker()
+history_store = HistoryStore()
 
 
 @router.get("/health")
@@ -29,6 +31,21 @@ async def health():
 async def metrics():
     """Return processing statistics from the most recent run."""
     return metrics_tracker.get_metrics()
+
+
+@router.get("/history")
+async def history():
+    """Return historical upload runs from persistent storage."""
+    return {"status": "ready", "items": history_store.list_runs(limit=200)}
+
+
+@router.get("/history/{run_id}")
+async def history_report(run_id: int):
+    """Return the stored JSON report for a historical run."""
+    report = history_store.get_run_report(run_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="History report not found.")
+    return {"status": "ready", "report": report}
 
 
 @router.post("/upload")
@@ -57,5 +74,10 @@ async def upload_csv(file: UploadFile = File(...)):
 
     result["summary"]["processing_time_seconds"] = processing_time
     metrics_tracker.record(result["summary"])
+    history_store.record_run(
+        filename=file.filename,
+        file_size_bytes=len(contents),
+        report=result,
+    )
 
     return JSONResponse(content=result)

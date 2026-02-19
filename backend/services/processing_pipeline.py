@@ -667,6 +667,20 @@ class ProcessingService:
             total_accounts=total_accounts,
             graph_data=graph_data,
         )
+        # Expose backend-driven model accuracy-style metrics for Analytics.
+        # These are aggregated model confidence percentages from the last run.
+        accounts_data = list(normalized.values())
+        if accounts_data:
+            rule_avg = float(np.mean([float(a.get("rule_risk_score", 0.0)) for a in accounts_data])) * 100.0
+            ml_avg = float(np.mean([float(a.get("ml_risk_score", 0.0)) for a in accounts_data])) * 100.0
+            total_avg = float(np.mean([float(a.get("final_risk_score", 0.0)) for a in accounts_data])) * 100.0
+        else:
+            rule_avg = 0.0
+            ml_avg = 0.0
+            total_avg = 0.0
+        res["summary"]["rule_based_accuracy"] = round(rule_avg, 2)
+        res["summary"]["ml_model_accuracy"] = round(ml_avg, 2)
+        res["summary"]["total_accuracy"] = round(total_avg, 2)
         # ENFORCE STRICT SCHEMA COMPLIANCE (Remove extra fields)
         res["summary"]["processing_time_seconds"] = round(time.time() - t_start, 4)
         return res

@@ -5,6 +5,7 @@ import Navbar from '../components/Navbar'
 import Footer from '../components/Footer'
 import RotatingEarth from '../components/RotatingGlobe'
 import { useAnalysis } from '../context/AnalysisContext'
+import { buildStrictExportPayload } from '../utils/jsonExport'
 
 /* ─── Animated counter ─── */
 function AnimatedCounter({ target, suffix = '', duration = 2000 }) {
@@ -108,9 +109,13 @@ export default function Home() {
             </p>
 
             <div className="animate-fade-in-up delay-500 flex items-center justify-center gap-5">
-              <Link to="/network-graph" className="group relative px-8 py-3.5 bg-white text-black rounded-full font-semibold transition-transform hover:scale-105">
+              <button
+                type="button"
+                onClick={() => document.getElementById('upload-csv')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                className="group relative px-8 py-3.5 bg-white text-black rounded-full font-semibold transition-transform hover:scale-105"
+              >
                 <span className="relative z-10">Get Started</span>
-              </Link>
+              </button>
               <Link to="/network-graph" className="px-8 py-3.5 rounded-full border border-white/20 hover:bg-white/10 transition-colors text-white font-medium backdrop-blur-sm">
                 View Live Graph
               </Link>
@@ -119,7 +124,7 @@ export default function Home() {
         </section>
 
         {/* ═══════ Upload ═══════ */}
-        <section ref={uploadRef} className="scroll-reveal relative py-32 px-8">
+        <section id="upload-csv" ref={uploadRef} className="scroll-reveal relative py-32 px-8">
           {/* Edge gradients - Blue/Purple/Red */}
           <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-accent-blue via-accent-purple to-accent-red opacity-30"></div>
 
@@ -186,16 +191,7 @@ export default function Home() {
                     </p>
                     <button
                       onClick={() => {
-                        const { graph_data, ...cleanData } = analysis;
-                        const finalData = {
-                          ...cleanData,
-                          suspicious_accounts: cleanData.suspicious_accounts.map(({ account_id, suspicion_score, detected_patterns, ring_id }) => ({
-                            account_id,
-                            suspicion_score,
-                            detected_patterns,
-                            ring_id
-                          }))
-                        };
+                        const finalData = buildStrictExportPayload(analysis)
                         const blob = new Blob([JSON.stringify(finalData, null, 2)], { type: 'application/json' });
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
