@@ -122,7 +122,6 @@ class ProcessingService:
         # 2. Cycle detection
         t_cyc = time.time()
         cycle_rings = detect_cycles(G, df)
-        print(f"Cycle detection took {time.time() - t_cyc:.2f}s")
         cycle_accounts: set = set()
         cycle_triggers: Dict[str, str] = {}
         for ring in cycle_rings:
