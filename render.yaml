@@ -3,8 +3,8 @@ services:
   - type: web
     name: graphlens-backend
     env: python
-    region: singapore # Optional
-    plan: free # Optional
+    # region: singapore # Optional - Removed for compatibility
+    # plan: free # Optional - Removed for compatibility
     buildCommand: pip install -r requirements.txt
     startCommand: cd backend && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:10000
     envVars:
