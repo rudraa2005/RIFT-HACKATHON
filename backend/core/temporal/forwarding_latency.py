@@ -24,56 +24,56 @@ def detect_rapid_pass_through(
     df: pd.DataFrame,
 ) -> Tuple[Set[str], Dict[str, Dict[str, Any]]]:
     """
-    Detect accounts with rapid pass-through behavior.
-
-    Returns:
-        (flagged_accounts_set, details_dict)
-        details_dict: {account_id: {"avg_holding_hours": float, "forward_ratio": float}}
-
-    Time Complexity: O(V × T)
+    Vectorized detection of rapid pass-through behavior (O(N log N)).
     """
     df = df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp")
 
     flagged: Set[str] = set()
     details: Dict[str, Dict[str, Any]] = {}
 
-    all_accounts = set(df["sender_id"].unique()) | set(df["receiver_id"].unique())
+    # Separate incoming and outgoing, pre-sort for asof merge
+    in_df = df[["receiver_id", "timestamp", "amount"]].rename(columns={"receiver_id": "account_id", "amount": "amount_in"})
+    out_df = df[["sender_id", "timestamp", "amount"]].rename(columns={"sender_id": "account_id", "amount": "amount_out"})
 
-    for account in all_accounts:
-        incoming = df[df["receiver_id"] == account].sort_values("timestamp")
-        outgoing = df[df["sender_id"] == account].sort_values("timestamp")
-
-        # Skip if only incoming or only outgoing
-        if incoming.empty or outgoing.empty:
-            continue
-
-        # Compute holding times: for each outgoing, find the closest prior incoming
-        holding_times = []
-        for _, out_row in outgoing.iterrows():
-            prior_incoming = incoming[incoming["timestamp"] <= out_row["timestamp"]]
-            if not prior_incoming.empty:
-                last_in_ts = prior_incoming["timestamp"].iloc[-1]
-                hold_h = (out_row["timestamp"] - last_in_ts).total_seconds() / 3600
-                holding_times.append(max(0, hold_h))
-
-        if not holding_times:
-            continue
-
-        avg_holding = sum(holding_times) / len(holding_times)
-
-        # Forward ratio
-        total_incoming = incoming["amount"].sum()
-        if total_incoming == 0:
-            continue
-        total_outgoing = outgoing["amount"].sum()
-        forward_ratio = total_outgoing / total_incoming
-
-        if avg_holding < HOLDING_TIME_THRESHOLD_HOURS and forward_ratio > HOLDING_FORWARD_RATIO:
-            flagged.add(account)
-            details[account] = {
-                "avg_holding_hours": round(avg_holding, 2),
-                "forward_ratio": round(forward_ratio, 2),
-            }
+    # Use merge_asof to find last incoming before each outgoing PER account
+    in_df_ext = in_df.rename(columns={"timestamp": "ts_in"})
+    
+    merged = pd.merge_asof(
+        out_df,
+        in_df_ext,
+        left_on="timestamp",
+        right_on="ts_in",
+        by="account_id",
+        direction="backward"
+    )
+    # Drop rows where there was no incoming transaction before the outgoing one
+    merged = merged.dropna(subset=["ts_in"])
+    merged["hold_h"] = (merged["timestamp"] - merged["ts_in"]).dt.total_seconds() / 3600
+    
+    # Aggregates per account
+    summary = merged.groupby("account_id").agg({
+        "hold_h": "mean",
+        "amount_out": "sum" # Total outgoing that had a prior incoming
+    })
+    
+    # Need total incoming sum for ratio
+    total_in = in_df.groupby("account_id")["amount_in"].sum()
+    
+    for account, row in summary.iterrows():
+        avg_hold = row["hold_h"]
+        total_outgoing = row["amount_out"]
+        total_incoming = total_in.get(account, 0)
+        
+        if total_incoming > 0:
+            ratio = total_outgoing / total_incoming
+            if avg_hold < HOLDING_TIME_THRESHOLD_HOURS and ratio > HOLDING_FORWARD_RATIO:
+                acc_str = str(account)
+                flagged.add(acc_str)
+                details[acc_str] = {
+                    "avg_holding_hours": round(avg_hold, 2),
+                    "forward_ratio": round(ratio, 2),
+                }
 
     return flagged, details

@@ -28,6 +28,7 @@ try:
         precision_score,
         roc_auc_score,
     )
+    from sklearn.preprocessing import StandardScaler
 
     _ML_AVAILABLE = True
 except ImportError:
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PARAMS: Dict[str, Any] = {
     "C": 1.0,
     "solver": "lbfgs",
-    "max_iter": 1000,
+    "max_iter": 2000,
     "random_state": 42,
     "class_weight": "balanced",
 }
@@ -47,41 +48,26 @@ _DEFAULT_PARAMS: Dict[str, Any] = {
 
 class RiskModel:
     """
-    Logistic Regression-based risk scoring model.
-
-    Usage:
-        model = RiskModel()
-        model.train(X_train, y_train)
-        probs = model.predict(X_test)
-        model.save("core/ml/models", version=1)
-
-        # Later...
-        model = RiskModel()
-        model.load("core/ml/models/risk_model_v1.pkl")
-        probs = model.predict(X_new)
+    Logistic Regression-based risk scoring model with built-in scaling.
     """
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         """Initialize with optional hyperparameter overrides."""
         if not _ML_AVAILABLE:
-            logger.warning(
-                "scikit-learn not installed. "
-                "ML scoring will be unavailable."
-            )
+            logger.warning("scikit-learn not installed. ML scoring unavailable.")
             self._model = None
             return
 
         self._params = {**_DEFAULT_PARAMS, **(params or {})}
         self._model: Optional[LogisticRegression] = None
+        self._scaler = StandardScaler()
 
     @property
     def is_available(self) -> bool:
-        """Check if the ML libraries are installed."""
         return _ML_AVAILABLE
 
     @property
     def is_trained(self) -> bool:
-        """Check if a model has been trained or loaded."""
         return self._model is not None
 
     def train(
@@ -90,64 +76,32 @@ class RiskModel:
         y: np.ndarray,
         eval_set: Optional[list] = None,
     ) -> "RiskModel":
-        """
-        Train the Logistic Regression classifier.
-
-        Args:
-            X: Feature matrix of shape (n_samples, n_features)
-            y: Binary labels of shape (n_samples,)  — 1=suspicious, 0=clean
-            eval_set: Ignored (not used by LogisticRegression)
-
-        Returns:
-            self (for chaining)
-        """
+        """Train the classifier with automatic feature scaling."""
         if not _ML_AVAILABLE:
             raise RuntimeError("scikit-learn not installed")
 
+        # Scale features
+        X_scaled = self._scaler.fit_transform(X)
+
         self._model = LogisticRegression(**self._params)
-        self._model.fit(X, y)
+        self._model.fit(X_scaled, y)
         
         n_pos = np.sum(y == 1)
-        n_neg = np.sum(y == 0)
-        logger.info(
-            "Model trained on %d samples (%d positive, %d negative)",
-            len(y),
-            int(n_pos),
-            int(n_neg),
-        )
+        logger.info("Model trained on %d samples (%d positive)", len(y), int(n_pos))
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Predict probability of being suspicious (class 1).
-
-        Args:
-            X: Feature matrix of shape (n_samples, n_features)
-
-        Returns:
-            np.ndarray of shape (n_samples,) with values in [0, 1]
-        """
+        """Predict probability scores with scaled features."""
         if self._model is None:
-            # Fallback for inference without trained model: simple weighting of features
-            # This ensures the pipeline doesn't break if no model is loaded.
-            logger.warning("Model not trained or loaded. Using fallback linear combination.")
-            # Weighted average of first 20 binary features (patterns)
-            # Multiplier of 3.0 ensures that ~7 patterns (out of 20) results in 100% risk.
-            return np.clip(np.mean(X[:, :20], axis=1) * 3.0, 0, 1)
+            # No trained model loaded: force caller to fall back to rule engine
+            logger.error("RiskModel.predict called without a trained model; returning zeros.")
+            return np.zeros(X.shape[0], dtype=float)
             
-        return self._model.predict_proba(X)[:, 1]
+        X_scaled = self._scaler.transform(X)
+        return self._model.predict_proba(X_scaled)[:, 1]
 
     def save(self, directory: str, version: int = 1) -> str:
-        """
-        Save model to a versioned pickle file.
-
-        Args:
-            directory: Output directory (created if not exists)
-            version: Model version number
-
-        Returns:
-            Full path to the saved model file
-        """
+        """Save model and scaler to a versioned pickle file."""
         if self._model is None:
             raise RuntimeError("No model to save — train first")
 
@@ -155,49 +109,54 @@ class RiskModel:
         filename = f"risk_model_v{version}.pkl"
         path = os.path.join(directory, filename)
         
+        bundle = {
+            "model": self._model,
+            "scaler": self._scaler,
+            "version": version
+        }
+        
         with open(path, "wb") as f:
-            pickle.dump(self._model, f)
+            pickle.dump(bundle, f)
 
-        # Save metadata alongside the model
+        # Save metadata alongside
         meta_path = os.path.join(directory, f"risk_model_v{version}_meta.json")
         meta = {
             "version": version,
             "params": self._params,
-            "format": "logistic_regression_pickle",
+            "format": "logistic_regression_bundle_v1",
         }
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
 
-        logger.info("Model saved to %s", path)
+        logger.info("Model bundle saved to %s", path)
         return path
 
     def load(self, path: str) -> "RiskModel":
-        """
-        Load a previously saved model.
-
-        Args:
-            path: Path to the .pkl model file (or .json if legacy)
-
-        Returns:
-            self (for chaining)
-        """
+        """Load a previously saved model bundle."""
         if not _ML_AVAILABLE:
             raise RuntimeError("scikit-learn not installed")
 
         if not os.path.exists(path):
-            logger.warning("Model file not found: %s. Using fallback.", path)
+            logger.warning("Model bundle not found: %s.", path)
             return self
 
         try:
-            if path.endswith(".json"):
-                 logger.warning("Legacy XGBoost JSON model cannot be loaded by LogisticRegression. Using fallback.")
-                 return self
-                 
             with open(path, "rb") as f:
-                self._model = pickle.load(f)
-            logger.info("Model loaded from %s", path)
+                bundle = pickle.load(f)
+            
+            if isinstance(bundle, dict) and "model" in bundle:
+                self._model = bundle["model"]
+                self._scaler = bundle.get("scaler", StandardScaler())
+                logger.info("Model bundle (v%s) loaded from %s", bundle.get("version"), path)
+            else:
+                # Direct model pickle (legacy)
+                self._model = bundle
+                self._scaler = StandardScaler() # Fallback
+                logger.info("Legacy model loaded from %s (using default scaler)", path)
+                
         except Exception as e:
-            logger.error("Failed to load model: %s. Using fallback.", str(e))
+            logger.error("Failed to load model: %s.", str(e))
+            # Leave self._model as None so callers can detect missing ML cleanly.
         
         return self
 

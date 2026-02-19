@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "params": {
+    "C": 1.0,
+    "solver": "lbfgs",
+    "max_iter": 2000,
+    "random_state": 42,
+    "class_weight": "balanced"
+  },
+  "format": "logistic_regression_bundle_v1"
+}

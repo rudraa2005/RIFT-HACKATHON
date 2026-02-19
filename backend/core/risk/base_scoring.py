@@ -210,13 +210,39 @@ def compute_scores(
             score += nonlinear_bonus
             patterns.append("nonlinear_amplifier")
             breakdown["nonlinear_multiplier"] = nonlinear_bonus
+        # Behavioural adjustments:
+        # - Down-weight single-pattern hits (likely weak evidence)
+        # - Up-weight rich multi-pattern behaviour
+        core_pattern_count = sum(
+            1 for p in patterns
+            if p not in {"multi_pattern", "nonlinear_amplifier", "merchant_like", "payroll_like"}
+        )
+        if core_pattern_count == 1:
+            score *= 0.75
+        elif core_pattern_count >= 3:
+            score *= 1.25
+
+        # Clamp preliminary score to a safe range
+        score = max(0.0, _capped(score))
 
         scores[account] = {
-            "score": score, 
-            "patterns": patterns, 
+            "score": score,
+            "patterns": patterns,
             "breakdown": breakdown,
-            "timeline": timeline
+            "timeline": timeline,
+            "pattern_count": core_pattern_count,
         }
+
+    # Second pass: globally normalize + non-linear shaping to avoid linear feel.
+    import math
+
+    max_score = max((data["score"] for data in scores.values()), default=0.0)
+    if max_score > 0:
+        for acct, data in scores.items():
+            base = data["score"] / max_score  # 0–1
+            # Exponential shaping: emphasise higher-risk accounts while keeping smooth.
+            shaped = base ** 0.7
+            data["score"] = round(shaped * 100.0, 2)
 
     return scores
 

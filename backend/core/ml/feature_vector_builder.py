@@ -1,95 +1,85 @@
 """
-Feature Vector Builder (v3) — No-Leakage Feature Engineering.
+Feature Vector Builder (v4) — schema-compliant behavioral engineering.
 
-Converts pattern sets + transaction data into feature vectors for ML.
+Strictly uses 5 columns: transaction_id, sender_id, receiver_id, amount, timestamp.
 
-Changes from v2:
-  - DROPPED: `pattern_count` (was a direct label proxy = sum of other features)
-  - ADDED: 7 continuous graph/behavioral features that the rule engine
-    does NOT threshold on, breaking circular learning:
-      - in_degree_ratio, out_degree_ratio
-      - tx_count, mean_amount, amount_std
-      - unique_counterparties, temporal_span_hours
-
-Feature order (27 features):
-  0–19  Binary pattern flags (same as v2)
+Feature order (32 features):
+  0–19  Binary pattern flags
   20    in_degree_ratio         float [0, 1]
   21    out_degree_ratio        float [0, 1]
-  22    tx_count                int   (log-scaled)
-  23    mean_amount             float (log-scaled)
-  24    amount_std              float (log-scaled)
-  25    unique_counterparties   int   (log-scaled)
-  26    temporal_span_hours     float (log-scaled)
-
-Time Complexity: O(V × P + E)
-Memory: O(V × P)
+  22    tx_count                log-scaled
+  23    mean_amount             log-scaled
+  24    amount_std              log-scaled
+  25    unique_counterparties   log-scaled
+  26    temporal_span_hours     log-scaled
+  27    is_round_amount         binary
+  28    is_night_transaction    binary
+  29    is_high_amount_outlier  binary
+  30    pagerank                continuous
+  31    local_clustering        continuous
 """
 
 from typing import Any, Dict, List, Set, Tuple, Optional
-
 import numpy as np
 import pandas as pd
 import networkx as nx
 
-# Canonical feature names in fixed order — must NOT be reordered.
 FEATURE_NAMES: List[str] = [
     # Binary pattern flags (0–19)
-    "cycle",
-    "smurfing_aggregator",
-    "smurfing_disperser",
-    "shell_account",
-    "high_velocity",
-    "rapid_pass_through",
-    "sudden_activity_spike",
-    "high_betweenness_centrality",
-    "low_retention_pass_through",
-    "high_throughput_ratio",
-    "balance_oscillation_pass_through",
-    "high_burst_diversity",
-    "large_scc_membership",
-    "deep_layered_cascade",
-    "irregular_activity_spike",
-    "high_closeness_centrality",
-    "high_local_clustering",
-    "rapid_forwarding",
-    "dormant_activation_spike",
+    "cycle", "smurfing_aggregator", "smurfing_disperser", "shell_account",
+    "high_velocity", "rapid_pass_through", "sudden_activity_spike",
+    "high_betweenness_centrality", "low_retention_pass_through",
+    "high_throughput_ratio", "balance_oscillation_pass_through",
+    "high_burst_diversity", "large_scc_membership", "deep_layered_cascade",
+    "irregular_activity_spike", "high_closeness_centrality",
+    "high_local_clustering", "rapid_forwarding", "dormant_activation_spike",
     "structured_fragmentation",
-    # Continuous graph features (20–21) - Purely structural
-    "in_degree_ratio",
-    "out_degree_ratio",
+    # Behavioral Features (20–26)
+    "in_degree_ratio", "out_degree_ratio", "tx_count", "mean_amount",
+    "amount_std", "unique_counterparties", "temporal_span_hours",
+    # Schema-Signals (27–29)
+    "is_round_amount", "is_night_transaction", "is_high_amount_outlier",
+    # Advanced Structural (30-31)
+    "pagerank", "local_clustering"
 ]
 
 NUM_BINARY_FEATURES: int = 20
 NUM_FEATURES: int = len(FEATURE_NAMES)
 
-
 def _safe_log1p(x: float) -> float:
-    """Log-scale a non-negative value: log(1 + x)."""
-    return float(np.log1p(max(0.0, x)))
+    return float(np.log1p(max(0.0, float(x))))
 
-
-def _compute_continuous_features(
+def _compute_behavioral_features(
     account: str,
     G: Optional[nx.MultiDiGraph],
     df: Optional[pd.DataFrame],
 ) -> List[float]:
-    """
-    Compute 2 purely structural continuous features for an account.
-
-    Returns [in_degree_ratio, out_degree_ratio]
-    """
+    res = [0.0] * 7
     if G is None or not G.has_node(account):
-        return [0.0, 0.0]
+        return res
 
-    # Degree ratios - Purely structural
     in_deg = G.in_degree(account)
     out_deg = G.out_degree(account)
     total_deg = in_deg + out_deg
-    in_ratio = in_deg / total_deg if total_deg > 0 else 0.0
-    out_ratio = out_deg / total_deg if total_deg > 0 else 0.0
+    if total_deg > 0:
+        res[0] = in_deg / total_deg
+        res[1] = out_deg / total_deg
 
-    return [in_ratio, out_ratio]
-
+    if df is not None:
+        mask = (df["sender_id"] == account) | (df["receiver_id"] == account)
+        acct_txns = df[mask]
+        if not acct_txns.empty:
+            amounts = acct_txns["amount"].astype(float).values
+            res[2] = _safe_log1p(len(amounts))
+            res[3] = _safe_log1p(np.mean(amounts))
+            res[4] = _safe_log1p(np.std(amounts))
+            counterparties = set(acct_txns["sender_id"]) | set(acct_txns["receiver_id"])
+            res[5] = _safe_log1p(len(counterparties) - 1)
+            if len(amounts) > 1:
+                ts = pd.to_datetime(acct_txns["timestamp"])
+                span = (ts.max() - ts.min()).total_seconds() / 3600
+                res[6] = _safe_log1p(span)
+    return res
 
 def build_feature_vectors(
     all_accounts: Set[str],
@@ -115,78 +105,43 @@ def build_feature_vectors(
     structured_fragmentation: Set[str],
     G: Optional[nx.MultiDiGraph] = None,
     df: Optional[pd.DataFrame] = None,
+    schema_signals: Optional[Dict[str, Dict[str, float]]] = None,
+    structural_scores: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Tuple[Dict[str, np.ndarray], List[str]]:
-    """
-    Build a fixed-order feature vector for every account.
-
-    Args:
-        all_accounts: Set of all account IDs.
-        *_accounts / *: Pattern membership sets.
-        G: Transaction graph (optional, for continuous features).
-        df: Transaction DataFrame (optional, for continuous features).
-
-    Returns:
-        Tuple of:
-            - dict mapping account_id → numpy array of shape (NUM_FEATURES,)
-            - list of account IDs in sorted order
-    """
-    # Ordered list of pattern sets — MUST match FEATURE_NAMES[:20]
-    pattern_sets: List[Set[str]] = [
-        cycle_accounts,
-        aggregators,
-        dispersers,
-        shell_accounts,
-        high_velocity,
-        rapid_pass_through,
-        activity_spike,
-        high_centrality,
-        low_retention,
-        high_throughput,
-        balance_oscillation,
-        burst_diversity,
-        scc_members,
-        cascade_depth,
-        irregular_activity,
-        high_closeness,
-        high_clustering,
-        rapid_forwarding,
-        dormant_activation,
-        structured_fragmentation,
+    pattern_sets = [
+        cycle_accounts, aggregators, dispersers, shell_accounts, high_velocity,
+        rapid_pass_through, activity_spike, high_centrality, low_retention,
+        high_throughput, balance_oscillation, burst_diversity, scc_members,
+        cascade_depth, irregular_activity, high_closeness, high_clustering,
+        rapid_forwarding, dormant_activation, structured_fragmentation
     ]
-
+    
     account_list = sorted(all_accounts)
     vectors: Dict[str, np.ndarray] = {}
 
     for account in account_list:
         vec = np.zeros(NUM_FEATURES, dtype=np.float32)
-
-        # Binary pattern flags (0–19)
         for i, pset in enumerate(pattern_sets):
-            if account in pset:
-                vec[i] = 1.0
+            if account in pset: vec[i] = 1.0
 
-        # Continuous features (20–26)
-        continuous = _compute_continuous_features(account, G, df)
-        for i, val in enumerate(continuous):
-            vec[NUM_BINARY_FEATURES + i] = val
+        behavioral = _compute_behavioral_features(account, G, df)
+        for i, val in enumerate(behavioral):
+            vec[20 + i] = val
+
+        if schema_signals and account in schema_signals:
+            s = schema_signals[account]
+            vec[27] = s.get("is_round_amount", 0.0)
+            vec[28] = s.get("is_night_transaction", 0.0)
+            vec[29] = s.get("is_high_amount_outlier", 0.0)
+
+        if structural_scores and account in structural_scores:
+            st = structural_scores[account]
+            vec[30] = st.get("pagerank", 0.0)
+            vec[31] = st.get("local_clustering", 0.0)
 
         vectors[account] = vec
 
     return vectors, account_list
 
-
-def vectors_to_matrix(
-    vectors: Dict[str, np.ndarray],
-    account_list: List[str],
-) -> np.ndarray:
-    """
-    Stack individual feature vectors into a 2-D numpy matrix.
-
-    Args:
-        vectors: dict mapping account_id → feature vector
-        account_list: ordered list of account IDs
-
-    Returns:
-        np.ndarray of shape (len(account_list), NUM_FEATURES)
-    """
+def vectors_to_matrix(vectors: Dict[str, np.ndarray], account_list: List[str]) -> np.ndarray:
     return np.vstack([vectors[acct] for acct in account_list])

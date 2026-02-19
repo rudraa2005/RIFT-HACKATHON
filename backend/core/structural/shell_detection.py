@@ -21,30 +21,45 @@ from app.config import (
 
 
 def _identify_shell_accounts(G: nx.MultiDiGraph, df: pd.DataFrame) -> Set[str]:
-    """Identify shell accounts by degree, transaction count, and holding time."""
+    """Identify shell accounts using vectorized grouping for O(N) speed."""
     df = df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
+    
+    # Pre-calculate node-level stats
+    # 1. Transaction counts
+    in_counts = df.groupby("receiver_id").size()
+    out_counts = df.groupby("sender_id").size()
+    
+    # 2. Holding times (min timestamp per account as sender vs receiver)
+    first_in = df.groupby("receiver_id")["timestamp"].min()
+    first_out = df.groupby("sender_id")["timestamp"].min()
+
     shell_accounts: Set[str] = set()
 
     for node in G.nodes():
+        node_str = str(node)
+        
+        # Static graph check
         total_degree = G.in_degree(node) + G.out_degree(node)
         if total_degree > SHELL_MAX_DEGREE:
             continue
 
-        in_txns = df[df["receiver_id"] == node]
-        out_txns = df[df["sender_id"] == node]
-        total_txns = len(in_txns) + len(out_txns)
-        if total_txns > SHELL_MAX_TRANSACTIONS:
+        # Transaction count check
+        n_in = in_counts.get(node_str, 0)
+        n_out = out_counts.get(node_str, 0)
+        if (n_in + n_out) > SHELL_MAX_TRANSACTIONS:
             continue
 
-        if not in_txns.empty and not out_txns.empty:
-            first_in = pd.to_datetime(in_txns["timestamp"]).min()
-            first_out = pd.to_datetime(out_txns["timestamp"]).min()
-            holding_hours = (first_out - first_in).total_seconds() / 3600
-            if holding_hours > SHELL_HOLDING_TIME_HOURS:
-                continue
+        # Holding time check
+        if n_in > 0 and n_out > 0:
+            t_in = first_in.get(node_str)
+            t_out = first_out.get(node_str)
+            if t_in and t_out:
+                holding_hours = (t_out - t_in).total_seconds() / 3600
+                if holding_hours > SHELL_HOLDING_TIME_HOURS:
+                    continue
 
-        shell_accounts.add(str(node))
+        shell_accounts.add(node_str)
 
     return shell_accounts
 

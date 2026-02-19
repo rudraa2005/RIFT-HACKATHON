@@ -1,0 +1,565 @@
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { useSearchParams, Link } from 'react-router-dom'
+import Navbar from '../components/Navbar'
+import { useAnalysis } from '../context/AnalysisContext'
+
+function buildGraphData(analysis, highlightRing, accountFocus) {
+  // When analysis is available, derive ring-aware graph data.
+  if (analysis?.graph_data?.nodes?.length && analysis.graph_data.edges?.length) {
+    const allNodes = []
+    const allEdges = []
+    const nodeMap = new Map()
+    const adjacency = new Map()
+
+    const suspiciousList = analysis.suspicious_accounts || []
+    const fraudRings = analysis.fraud_rings || []
+
+    // Map account -> suspicion and ring membership
+    const accountMeta = new Map()
+    suspiciousList.forEach((a) => {
+      accountMeta.set(a.account_id, {
+        suspicion: a.suspicion_score,
+        ringId: a.ring_id === 'RING_NONE' ? null : a.ring_id,
+      })
+    })
+    const ringRisk = new Map()
+    fraudRings.forEach((r) => {
+      ringRisk.set(r.ring_id, r.risk_score)
+      r.member_accounts.forEach((acct) => {
+        const meta = accountMeta.get(acct) || { suspicion: 0, ringId: null }
+        accountMeta.set(acct, { ...meta, ringId: r.ring_id })
+      })
+    })
+
+    // Decide which accounts to include:
+    // - If a ring is highlighted: only that ring's accounts
+    // - Otherwise: all accounts in rings with risk_score > 75
+    let allowedAccounts = new Set()
+    if (highlightRing) {
+      fraudRings
+        .filter((r) => r.ring_id === highlightRing)
+        .forEach((r) => r.member_accounts.forEach((acct) => allowedAccounts.add(String(acct))))
+    } else {
+      fraudRings
+        .filter((r) => r.risk_score >= 75)
+        .forEach((r) => r.member_accounts.forEach((acct) => allowedAccounts.add(String(acct))))
+    }
+
+    // If no rings qualify, fall back to all suspicious accounts.
+    if (!allowedAccounts.size && suspiciousList.length) {
+      suspiciousList.forEach((a) => allowedAccounts.add(a.account_id))
+    }
+
+    // Build adjacency for account-level navigation
+    analysis.graph_data.edges.forEach((edge) => {
+      const u = String(edge.source)
+      const v = String(edge.target)
+      if (!adjacency.has(u)) adjacency.set(u, new Set())
+      if (!adjacency.has(v)) adjacency.set(v, new Set())
+      adjacency.get(u).add(v)
+      adjacency.get(v).add(u)
+    })
+
+    // If focusing on a specific account, override allowedAccounts with its connected component.
+    if (accountFocus) {
+      const start = String(accountFocus)
+      const visited = new Set([start])
+      const queue = [start]
+      while (queue.length) {
+        const cur = queue.shift()
+        const nbrs = adjacency.get(cur)
+        if (!nbrs) continue
+        for (const n of nbrs) {
+          if (!visited.has(n)) {
+            visited.add(n)
+            queue.push(n)
+          }
+        }
+      }
+      allowedAccounts = visited
+    }
+
+    analysis.graph_data.nodes.forEach((node) => {
+      const id = String(node.id)
+      if (allowedAccounts.size && !allowedAccounts.has(id)) return
+
+      const meta = accountMeta.get(id) || { suspicion: node.risk_score || 0, ringId: null }
+      const ringId = meta.ringId
+      const ringScore = ringId ? ringRisk.get(ringId) ?? 0 : 0
+      const isSuspicious = meta.suspicion >= 75 || node.is_suspicious || (node.risk_score || 0) >= 75
+
+      if (!nodeMap.has(id)) {
+        nodeMap.set(id, {
+          globalId: id,
+          label: id,
+          role: isSuspicious ? 'Suspicious' : 'Monitored',
+          r: isSuspicious ? 8 : 5,
+          color: isSuspicious ? '#e5e5e5' : '#444',
+          ringId,
+          accId: id,
+          txnId: '',
+          amount: '',
+          timestamp: '',
+          ringType: ringId ? fraudRings.find((r) => r.ring_id === ringId)?.pattern_type ?? null : null,
+          ringScore,
+          isSuspicious,
+        })
+        allNodes.push(nodeMap.get(id))
+      }
+    })
+
+    analysis.graph_data.edges.forEach((edge) => {
+      const fromId = String(edge.source)
+      const toId = String(edge.target)
+      if (allowedAccounts.size && (!allowedAccounts.has(fromId) || !allowedAccounts.has(toId))) return
+
+      const from = nodeMap.get(fromId)
+      const to = nodeMap.get(toId)
+      if (!from || !to) return
+
+      const isSuspicious = from.isSuspicious || to.isSuspicious
+      const ringId = from.ringId && from.ringId === to.ringId ? from.ringId : null
+      allEdges.push({
+        from: fromId,
+        to: toId,
+        suspicious: isSuspicious,
+        ringId,
+        amount: edge.amount,
+        timestamp: edge.timestamp,
+        transaction_id: edge.transaction_id,
+      })
+
+      // Attach one representative transaction to the target node for tooltip display.
+      if (!to.txnId && edge.transaction_id) {
+        to.txnId = edge.transaction_id
+        to.amount = typeof edge.amount === 'number' ? `$${edge.amount.toLocaleString()}` : String(edge.amount || '')
+        to.timestamp = edge.timestamp || ''
+      }
+    })
+
+    return { allNodes, allEdges }
+  }
+
+  // Minimal fallback demo graph when no analysis is available yet
+  const demoNodes = [
+    { globalId: 'A', label: 'ACCT-A', role: 'Monitored', r: 6, color: '#444', ringId: null, accId: 'ACCT-A', txnId: 'DEMO-1', amount: '$1,200', timestamp: 'Demo' },
+    { globalId: 'B', label: 'ACCT-B', role: 'Suspicious', r: 8, color: '#e5e5e5', ringId: null, accId: 'ACCT-B', txnId: 'DEMO-2', amount: '$8,400', timestamp: 'Demo' },
+    { globalId: 'C', label: 'ACCT-C', role: 'Monitored', r: 5, color: '#444', ringId: null, accId: 'ACCT-C', txnId: 'DEMO-3', amount: '$600', timestamp: 'Demo' },
+  ]
+  const demoEdges = [
+    { from: 'A', to: 'B', suspicious: true, ringId: null },
+    { from: 'B', to: 'C', suspicious: true, ringId: null },
+  ]
+  return { allNodes: demoNodes, allEdges: demoEdges }
+}
+
+export default function NetworkGraph() {
+  const [searchParams] = useSearchParams()
+  const highlightRing = searchParams.get('ring')
+  const accountFocus = searchParams.get('account')
+  const { analysis } = useAnalysis()
+
+  const canvasRef = useRef(null)
+  const animRef = useRef(null)
+  const nodesRef = useRef([])
+  const edgesRef = useRef([])
+  const hoveredRef = useRef(null)
+  const panRef = useRef({ x: 0, y: 0 })
+  const zoomRef = useRef(1)
+  const dragRef = useRef(null)
+  const lastMouseRef = useRef({ x: 0, y: 0 })
+  const isPanningRef = useRef(false)
+  const sizeRef = useRef({ w: 0, h: 0 })
+
+  const [hoveredNode, setHoveredNode] = useState(null)
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 })
+  const [selectedNode, setSelectedNode] = useState(null)
+  const [zoomLevel, setZoomLevel] = useState(100)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const w = canvas.offsetWidth, h = canvas.offsetHeight
+    sizeRef.current = { w, h }
+    canvas.width = w * 2; canvas.height = h * 2
+
+    const { allNodes, allEdges } = buildGraphData(analysis, highlightRing, accountFocus)
+    const cx = w / 2, cy = h / 2
+    const ringIds = [...new Set(allNodes.filter(n => n.ringId).map(n => n.ringId))]
+    const clusterPositions = {}
+    ringIds.forEach((rid, i) => {
+      const angle = (i / ringIds.length) * Math.PI * 2 - Math.PI / 2
+      clusterPositions[rid] = {
+        x: cx + Math.cos(angle) * Math.min(w, h) * 0.28,
+        y: cy + Math.sin(angle) * Math.min(w, h) * 0.28,
+      }
+    })
+
+    nodesRef.current = allNodes.map((node) => {
+      let startX, startY
+      if (node.ringId && clusterPositions[node.ringId]) {
+        const cp = clusterPositions[node.ringId]
+        const a = Math.random() * Math.PI * 2
+        startX = cp.x + Math.cos(a) * (30 + Math.random() * 60)
+        startY = cp.y + Math.sin(a) * (30 + Math.random() * 60)
+      } else {
+        startX = cx + (Math.random() - 0.5) * w * 0.8
+        startY = cy + (Math.random() - 0.5) * h * 0.8
+      }
+      return { ...node, x: startX, y: startY, vx: 0, vy: 0, targetX: startX, targetY: startY, isHighlighted: highlightRing && node.ringId === highlightRing }
+    })
+    edgesRef.current = allEdges.map(e => ({ ...e, dashOffset: 0 }))
+  }, [highlightRing, accountFocus, analysis])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    const getNode = (id) => nodesRef.current.find(n => n.globalId === id)
+
+    function tick() {
+      const { w, h } = sizeRef.current
+      const zoom = zoomRef.current, pan = panRef.current
+      ctx.setTransform(2, 0, 0, 2, 0, 0)
+      ctx.clearRect(0, 0, w, h)
+      ctx.fillStyle = 'rgb(25,25,25)'; ctx.fillRect(0, 0, w, h)
+
+      ctx.save()
+      ctx.translate(pan.x, pan.y)
+      ctx.scale(zoom, zoom)
+
+      // Dotted Grid - Enhanced Visibility
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)' // Brighter for clear design
+      const gs = 50 // Grid size
+      const sx = Math.floor(-pan.x / zoom / gs) * gs - gs
+      const sy = Math.floor(-pan.y / zoom / gs) * gs - gs
+      for (let gx = sx; gx < sx + w / zoom + gs * 2; gx += gs) {
+        for (let gy = sy; gy < sy + h / zoom + gs * 2; gy += gs) {
+          ctx.beginPath(); ctx.arc(gx, gy, 1.0 / zoom, 0, Math.PI * 2); ctx.fill()
+        }
+      }
+
+      const nodes = nodesRef.current, edges = edgesRef.current
+      const hovered = hoveredRef.current, dragging = dragRef.current
+
+      // Physics
+      for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i]
+        if (dragging === n) continue
+        n.vx += (n.targetX - n.x) * 0.008
+        n.vy += (n.targetY - n.y) * 0.008
+        n.vx += Math.sin(Date.now() * 0.0005 + i * 1.7) * 0.04
+        n.vy += Math.cos(Date.now() * 0.0006 + i * 2.3) * 0.03
+        for (const edge of edges) {
+          let other = null
+          if (edge.from === n.globalId) other = getNode(edge.to)
+          else if (edge.to === n.globalId) other = getNode(edge.from)
+          if (!other) continue
+          const dx = other.x - n.x, dy = other.y - n.y
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1
+          if (dist > 80) { n.vx += (dx / dist) * 0.008; n.vy += (dy / dist) * 0.008 }
+        }
+        for (let j = i + 1; j < nodes.length; j++) {
+          const o = nodes[j]
+          const dx = n.x - o.x, dy = n.y - o.y
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1
+          const minD = (n.r + o.r) * 3
+          if (dist < minD) {
+            const f = (minD - dist) * 0.004
+            n.vx += (dx / dist) * f; n.vy += (dy / dist) * f
+            o.vx -= (dx / dist) * f; o.vy -= (dy / dist) * f
+          }
+        }
+        n.vx *= 0.94; n.vy *= 0.94; n.x += n.vx; n.y += n.vy
+      }
+
+      // Edges
+      for (const edge of edges) {
+        const from = getNode(edge.from), to = getNode(edge.to)
+        if (!from || !to) continue
+        const isRing = edge.ringId === highlightRing
+        const isHov = hovered && (hovered.globalId === edge.from || hovered.globalId === edge.to)
+
+        // Draw Edge
+        ctx.beginPath()
+        ctx.moveTo(from.x, from.y)
+        ctx.lineTo(to.x, to.y)
+
+        // Monochrome Edge Styling
+        const isSuspicious = edge.suspicious
+        if (isSuspicious || isRing) {
+          ctx.strokeStyle = isHov ? '#ffffff' : 'rgba(255, 255, 255, 0.9)' // Pure White for highlighted/risk
+          ctx.lineWidth = (isHov ? 3 : 2) / zoom
+          ctx.setLineDash([5 / zoom, 5 / zoom])
+        } else {
+          ctx.strokeStyle = isHov ? '#ffffff' : 'rgba(255, 255, 255, 0.15)' // Faint White for others
+          ctx.lineWidth = (isHov ? 2 : 1) / zoom
+          ctx.setLineDash([])
+        }
+
+        ctx.stroke()
+
+        // Draw Arrow
+        if (isSuspicious || isHov || isRing || zoom > 1.2) {
+          const angle = Math.atan2(to.y - from.y, to.x - from.x)
+          const headLen = (isHov ? 12 : 8) / zoom
+          const r = (to.r * 2.5) + (isHov ? 5 : 0) + (2 / zoom)
+          const endX = to.x - r * Math.cos(angle)
+          const endY = to.y - r * Math.sin(angle)
+
+          ctx.beginPath()
+          ctx.moveTo(endX, endY)
+          ctx.lineTo(endX - headLen * Math.cos(angle - Math.PI / 6), endY - headLen * Math.sin(angle - Math.PI / 6))
+          ctx.lineTo(endX - headLen * Math.cos(angle + Math.PI / 6), endY - headLen * Math.sin(angle + Math.PI / 6))
+          ctx.lineTo(endX, endY)
+          ctx.fillStyle = ctx.strokeStyle
+          ctx.fill()
+        }
+        ctx.setLineDash([])
+      }
+
+      // Nodes
+      for (const n of nodes) {
+        const isHov = hovered?.globalId === n.globalId
+        const isSel = selectedNode?.globalId === n.globalId
+        const isHL = n.isHighlighted // Belongs to the searched ring
+
+        // Size
+        const baseR = n.r * 2.8
+        let drawR = baseR * (isHov ? 1.3 : 1) / zoom
+
+        // Highlights Logic
+        // If a ring is highlighted:
+        // - Nodes in ring (isHL) -> Full Opacity, White Glow
+        // - Nodes NOT in ring -> Low Opacity (dimmed)
+        // If NO ring highlighted (Default View):
+        // - Standard clean look, no glows, simple borders
+        const isDimmed = highlightRing && !isHL && !isHov && !isSel
+
+        // 1. Draw Glow (Only for active/hovered/highlighted/selected)
+        // REMOVED glow for 'suspicious' in default view to keep it clean
+        if (!isDimmed && (isHov || isHL || isSel)) {
+          ctx.beginPath(); ctx.arc(n.x, n.y, drawR + (isHov ? 12 : 8) / zoom, 0, Math.PI * 2)
+          // Pure White Glow
+          const glowAlpha = isHov ? 0.6 : (isHL ? 0.5 : 0.2)
+          ctx.fillStyle = `rgba(255, 255, 255, ${glowAlpha})`; ctx.fill()
+        }
+
+        // 2. Main Circle Body -> Simple Black
+        ctx.beginPath()
+        ctx.arc(n.x, n.y, drawR, 0, Math.PI * 2)
+        ctx.fillStyle = '#000000'
+        ctx.globalAlpha = isDimmed ? 0.35 : 1 // Increased visibility for dimmed context (0.1 -> 0.35)
+        ctx.fill()
+        ctx.globalAlpha = 1
+
+        // 3. Border - Minimalist
+        // If HIGHLIGHTING is active, use high contrast white
+        // If DEFAULT view, use subtle grey/white for visibility but no strong gradients
+        const grad = ctx.createLinearGradient(n.x - drawR, n.y - drawR, n.x + drawR, n.y + drawR)
+
+        if (isDimmed) {
+          grad.addColorStop(0, '#333'); grad.addColorStop(1, '#111')
+        } else if (isHL || isHov || isSel) {
+          // High Contrast for Active Elements
+          grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#aaaaaa')
+        } else {
+          // Default View - Very subtle, clean
+          // User requested "remove extra white boundary", so we make it darker (Deep Grey)
+          grad.addColorStop(0, '#333333'); grad.addColorStop(1, '#111111')
+        }
+
+        ctx.strokeStyle = grad
+        ctx.lineWidth = (isHov || isHL ? 2.5 : 1.0) / zoom // Thinner default border
+        ctx.globalAlpha = isDimmed ? 0.35 : 1 // Match body opacity
+        ctx.stroke()
+        ctx.globalAlpha = 1
+
+        // Label
+        if (!isDimmed && ((baseR >= 9 && zoom >= 0.5) || isHov || isHL)) {
+          ctx.fillStyle = isHov || isHL ? '#fff' : '#666' // Dimmer labels by default
+          ctx.font = `600 ${(isHov ? 10 : 8) / zoom}px 'JetBrains Mono', monospace`
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+          ctx.fillText(n.label.split('-').pop(), n.x, n.y)
+        }
+      }
+
+      ctx.restore()
+      animRef.current = requestAnimationFrame(tick)
+    }
+    animRef.current = requestAnimationFrame(tick)
+    return () => { if (animRef.current) cancelAnimationFrame(animRef.current) }
+  }, [highlightRing, selectedNode])
+
+  const screenToWorld = useCallback((sx, sy) => ({
+    x: (sx - panRef.current.x) / zoomRef.current,
+    y: (sy - panRef.current.y) / zoomRef.current,
+  }), [])
+
+  const worldToScreen = useCallback((wx, wy) => ({
+    x: wx * zoomRef.current + panRef.current.x,
+    y: wy * zoomRef.current + panRef.current.y,
+  }), [])
+
+  const handleMouseMove = useCallback((e) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const sx = e.clientX - rect.left, sy = e.clientY - rect.top
+
+    if (dragRef.current) {
+      const w = screenToWorld(sx, sy)
+      dragRef.current.x = w.x; dragRef.current.y = w.y
+      dragRef.current.vx = 0; dragRef.current.vy = 0; return
+    }
+    if (isPanningRef.current) {
+      panRef.current.x += sx - lastMouseRef.current.x
+      panRef.current.y += sy - lastMouseRef.current.y
+      lastMouseRef.current = { x: sx, y: sy }; canvas.style.cursor = 'grabbing'; return
+    }
+    lastMouseRef.current = { x: sx, y: sy }
+    const w = screenToWorld(sx, sy)
+    let found = null
+    for (const n of nodesRef.current) {
+      const dx = w.x - n.x, dy = w.y - n.y
+      if (dx * dx + dy * dy <= (n.r + 4) * (n.r + 4)) { found = n; break }
+    }
+    hoveredRef.current = found
+    if (found) {
+      setHoveredNode(found)
+      const sp = worldToScreen(found.x, found.y - found.r - 15)
+      setTooltipPos(sp); canvas.style.cursor = 'pointer'
+    } else { setHoveredNode(null); canvas.style.cursor = 'grab' }
+  }, [screenToWorld, worldToScreen])
+
+  const handleMouseDown = useCallback((e) => {
+    const rect = canvasRef.current?.getBoundingClientRect()
+    if (!rect) return
+    lastMouseRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    if (hoveredRef.current) { dragRef.current = hoveredRef.current; setSelectedNode(hoveredRef.current) }
+    else { isPanningRef.current = true }
+  }, [])
+
+  const handleMouseUp = useCallback(() => {
+    if (dragRef.current) { dragRef.current.targetX = dragRef.current.x; dragRef.current.targetY = dragRef.current.y; dragRef.current = null }
+    isPanningRef.current = false
+  }, [])
+
+  const handleWheel = useCallback((e) => {
+    e.preventDefault()
+    const rect = canvasRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top
+    const f = e.deltaY > 0 ? 0.92 : 1.08
+    const nz = Math.max(0.2, Math.min(4, zoomRef.current * f))
+    panRef.current.x = mx - (mx - panRef.current.x) * (nz / zoomRef.current)
+    panRef.current.y = my - (my - panRef.current.y) * (nz / zoomRef.current)
+    zoomRef.current = nz; setZoomLevel(Math.round(nz * 100))
+  }, [])
+
+  useEffect(() => {
+    const c = canvasRef.current
+    if (!c) return
+    c.addEventListener('wheel', handleWheel, { passive: false })
+    return () => c.removeEventListener('wheel', handleWheel)
+  }, [handleWheel])
+
+  const highlightedRingData = highlightRing ? fraudRingsData.find(r => r.id === highlightRing) : null
+
+  return (
+    <div className="bg-[rgb(25,25,25)] text-[rgb(200,200,200)] font-display overflow-hidden h-screen flex flex-col relative">
+      <Navbar />
+      <main className="flex-1 relative overflow-hidden mt-24 w-full h-[calc(100vh-96px)]">
+        {highlightedRingData && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 liquid-glass px-5 py-2.5 rounded-full flex items-center gap-3">
+            <span className="size-1.5 rounded-full bg-primary animate-pulse"></span>
+            <span className="text-xs font-semibold text-white">Investigating #{highlightedRingData.id}</span>
+            <span className="text-[10px] text-neutral-500">• {highlightedRingData.type} •</span>
+            <span className="text-[10px] font-semibold text-neutral-300">Score: {highlightedRingData.score}</span>
+            <Link to="/fraud-rings" className="text-[10px] text-neutral-400 hover:text-white transition-colors font-semibold ml-1">← Back</Link>
+          </div>
+        )}
+
+        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{ cursor: 'grab' }}
+          onMouseMove={handleMouseMove} onMouseDown={handleMouseDown} onMouseUp={handleMouseUp}
+          onMouseLeave={() => { hoveredRef.current = null; setHoveredNode(null); isPanningRef.current = false; dragRef.current = null }} />
+
+        {/* Edge Gradients - Blue/Purple/Red */}
+        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-accent-blue via-accent-purple to-accent-red opacity-50 z-20"></div>
+        <div className="absolute bottom-0 left-0 right-0 h-24 bg-gradient-to-t from-background-dark to-transparent z-20 pointer-events-none"></div>
+
+        {/* Sidebar */}
+
+
+        {hoveredNode && (
+          <div className="node-tooltip absolute z-50 px-5 py-4 min-w-[280px] pointer-events-none"
+            style={{ left: tooltipPos.x, top: tooltipPos.y, transform: 'translate(-50%, -100%)' }}>
+            <div className="flex items-center gap-2 mb-2.5">
+              <div className="size-2 rounded-full bg-primary"></div>
+              <span className="text-[10px] uppercase font-semibold tracking-widest text-[rgb(107,107,107)]">{hoveredNode.role}</span>
+              {hoveredNode.ringId && <span className="text-[9px] text-primary font-semibold ml-auto">#{hoveredNode.ringId}</span>}
+            </div>
+            <p className="text-sm font-bold text-white mb-3 font-technical">{hoveredNode.label}</p>
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between gap-6"><span className="text-[rgb(107,107,107)]">Account ID</span><span className="text-white font-technical">{hoveredNode.accId}</span></div>
+              <div className="flex justify-between gap-6"><span className="text-[rgb(107,107,107)]">Transaction ID</span><span className="text-white font-technical">{hoveredNode.txnId}</span></div>
+              <div className="flex justify-between gap-6"><span className="text-[rgb(107,107,107)]">Amount</span><span className="text-primary font-bold font-technical">{hoveredNode.amount}</span></div>
+              <div className="flex justify-between gap-6"><span className="text-[rgb(107,107,107)]">Timestamp</span><span className="text-[rgb(180,180,180)] font-technical">{hoveredNode.timestamp}</span></div>
+            </div>
+          </div>
+        )}
+
+        {selectedNode && (
+          <aside className="absolute top-4 left-6 w-[420px] z-30 pointer-events-auto">
+            <div className="bg-[rgb(20,20,20)] border border-[rgb(36,36,36)] rounded-2xl overflow-hidden shadow-2xl shadow-black/40">
+              <div className="p-5 border-b border-[rgb(36,36,36)]">
+                <div className="flex justify-between items-start mb-3">
+                  <span className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest">{selectedNode.role}</span>
+                  <button onClick={() => setSelectedNode(null)} className="text-neutral-500 hover:text-white transition-colors">
+                    <span className="material-symbols-outlined text-sm">close</span>
+                  </button>
+                </div>
+                <h2 className="text-lg font-bold text-white font-technical">{selectedNode.label}</h2>
+                {selectedNode.ringId && <p className="text-[10px] text-neutral-500 font-medium mt-0.5">Ring #{selectedNode.ringId} • {selectedNode.ringType}</p>}
+              </div>
+              <div className="p-5 space-y-3">
+                {[
+                  ['Account ID', selectedNode.accId],
+                  ['Transaction ID', selectedNode.txnId],
+                  ['Amount', selectedNode.amount],
+                  ['Timestamp', selectedNode.timestamp],
+                ].map(([label, val]) => (
+                  <div key={label} className="flex justify-between text-xs">
+                    <span className="text-neutral-500">{label}</span>
+                    <span className="text-white font-technical">{val}</span>
+                  </div>
+                ))}
+                {selectedNode.ringScore && (
+                  <div className="pt-3 mt-2 border-t border-[rgb(36,36,36)]">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-neutral-500">Ring Risk Score</span>
+                      <span className="text-primary font-bold text-sm">{selectedNode.ringScore}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </aside>
+        )}
+
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 liquid-glass rounded-full px-3.5 py-1.5 flex items-center gap-3 z-20">
+          <button onClick={() => { zoomRef.current = Math.max(0.2, zoomRef.current * 0.8); setZoomLevel(Math.round(zoomRef.current * 100)) }}
+            className="text-neutral-500 hover:text-white transition-colors"><span className="material-symbols-outlined text-lg">remove</span></button>
+          <span className="text-[10px] font-technical text-neutral-500 w-8 text-center">{zoomLevel}%</span>
+          <button onClick={() => { zoomRef.current = Math.min(4, zoomRef.current * 1.2); setZoomLevel(Math.round(zoomRef.current * 100)) }}
+            className="text-neutral-500 hover:text-white transition-colors"><span className="material-symbols-outlined text-lg">add</span></button>
+          <div className="w-px h-3 bg-white/[0.08]"></div>
+          <button onClick={() => { zoomRef.current = 1; panRef.current = { x: 0, y: 0 }; setZoomLevel(100) }}
+            className="text-neutral-400 hover:text-white transition-colors"><span className="material-symbols-outlined text-lg">center_focus_weak</span></button>
+        </div>
+
+
+      </main>
+    </div >
+  )
+}
