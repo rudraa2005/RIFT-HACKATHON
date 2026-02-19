@@ -21,7 +21,7 @@ from app.config import (
 
 
 def detect_merchants(df: pd.DataFrame) -> Set[str]:
-    """Flag receiver accounts that look like merchants."""
+    """Flag receiver accounts that look like merchants (legitimate businesses)."""
     df = df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     merchants: Set[str] = set()
@@ -29,28 +29,40 @@ def detect_merchants(df: pd.DataFrame) -> Set[str]:
     for account in df["receiver_id"].unique():
         incoming = df[df["receiver_id"] == account]
 
-        if incoming["sender_id"].nunique() < MERCHANT_MIN_COUNTERPARTIES:
+        # More lenient: if many unique senders over time, likely merchant
+        unique_senders = incoming["sender_id"].nunique()
+        if unique_senders < MERCHANT_MIN_COUNTERPARTIES:
             continue
 
         span_days = (incoming["timestamp"].max() - incoming["timestamp"].min()).days
         if span_days < MERCHANT_MIN_SPAN_DAYS:
             continue
 
+        # Check for varied amounts (merchants have diverse transaction sizes)
         mean_amt = incoming["amount"].mean()
         if mean_amt > 0 and len(incoming) > 1:
             cv = incoming["amount"].std() / mean_amt
             if cv > 0.5:
+                merchants.add(str(account))
+        
+        # Also check: if account receives from many different senders with small-medium amounts
+        # and has reasonable time span, likely merchant
+        if unique_senders >= 10 and span_days >= 30:
+            avg_amount = incoming["amount"].mean()
+            # Typical merchant transactions: not too large, not too small
+            if 100 <= avg_amount <= 10000:
                 merchants.add(str(account))
 
     return merchants
 
 
 def detect_payroll(df: pd.DataFrame) -> Set[str]:
-    """Flag sender accounts that look like payroll disbursers."""
+    """Flag sender accounts that look like payroll disbursers AND recipients."""
     df = df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     payroll: Set[str] = set()
 
+    # Detect payroll senders (companies paying employees)
     for account in df["sender_id"].unique():
         outgoing = df[df["sender_id"] == account]
         if len(outgoing) < 5:
@@ -72,6 +84,9 @@ def detect_payroll(df: pd.DataFrame) -> Set[str]:
         cv = outgoing["amount"].std() / mean_amt
         if cv < PAYROLL_SIMILAR_AMOUNT_CV:
             payroll.add(str(account))
+            # Also mark all recipients as payroll recipients (legitimate employees)
+            for recipient in outgoing["receiver_id"].unique():
+                payroll.add(str(recipient))
 
     return payroll
 

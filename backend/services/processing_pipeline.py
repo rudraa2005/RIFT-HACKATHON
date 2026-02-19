@@ -312,22 +312,34 @@ class ProcessingService:
 
         # 23. ML inference + hybrid scoring
         ml_scores = None
-        if ML_ENABLED and os.path.exists(ML_MODEL_PATH):
-            try:
-                model = RiskModel()
-                model.load(ML_MODEL_PATH)
-                X = vectors_to_matrix(feature_vectors, account_list)
-                probs = model.predict(X)
-                ml_scores = {
-                    acct: float(prob)
-                    for acct, prob in zip(account_list, probs)
-                }
-                logger.info("ML scoring completed for %d accounts", len(ml_scores))
-            except Exception as e:
-                logger.warning(
-                    "ML scoring unavailable, falling back to rule-only: %s", e
-                )
-                ml_scores = None
+        if ML_ENABLED:
+            # Resolve model path relative to backend root
+            model_path = ML_MODEL_PATH
+            if not os.path.isabs(model_path):
+                backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                model_path = os.path.join(backend_root, model_path)
+            
+            if os.path.exists(model_path):
+                try:
+                    model = RiskModel()
+                    model.load(model_path)
+                    if model.is_trained:
+                        X = vectors_to_matrix(feature_vectors, account_list)
+                        probs = model.predict(X)
+                        ml_scores = {
+                            acct: float(prob)
+                            for acct, prob in zip(account_list, probs)
+                        }
+                        logger.info("ML scoring completed for %d accounts", len(ml_scores))
+                    else:
+                        logger.warning("ML model loaded but not trained; using rule-only scoring")
+                except Exception as e:
+                    logger.warning(
+                        "ML scoring unavailable, falling back to rule-only: %s", e
+                    )
+                    ml_scores = None
+            else:
+                logger.warning("ML model file not found at %s; using rule-only scoring", model_path)
 
         normalized = compute_hybrid_scores(normalized, ml_scores)
 

@@ -72,13 +72,15 @@ def format_output(
 
     suspicious_accounts: List[Dict[str, Any]] = []
     for account_id, data in scores.items():
-        if data["score"] <= 0:
+        # Filter out accounts with very low scores (likely false positives)
+        if data["score"] <= 5.0:  # Only include accounts with meaningful risk
             continue
 
         detected_patterns = [
             _map_pattern_name(p) for p in data["patterns"] if p not in _INTERNAL_PATTERNS
         ]
-        if not detected_patterns:
+        # Also filter if only internal patterns (merchant/payroll) remain
+        if not detected_patterns or all(p in _INTERNAL_PATTERNS for p in data["patterns"]):
             continue
 
         # Use hybrid final_risk_score (0-1) scaled to 0-100 if available,
@@ -105,11 +107,26 @@ def format_output(
     suspicious_accounts.sort(key=lambda x: x["suspicion_score"], reverse=True)
 
     fraud_rings: List[Dict[str, Any]] = []
+    # Map pattern types to user-friendly names
+    pattern_type_map = {
+        "smurfing_fan_in": "fan_in",
+        "smurfing_fan_out": "fan_out",
+        "cycle": "cycle",
+        "shell_chain": "shell_chain",
+    }
+    
     for ring in all_rings:
+        pattern_type = ring.get("pattern_type", "unknown")
+        # Normalize pattern type
+        if pattern_type in pattern_type_map:
+            pattern_type = pattern_type_map[pattern_type]
+        elif pattern_type.startswith("smurfing"):
+            pattern_type = "fan_in" if "fan_in" in pattern_type else "fan_out"
+        
         ring_obj = {
             "ring_id": ring["ring_id"],
             "member_accounts": ring["members"],
-            "pattern_type": ring["pattern_type"],
+            "pattern_type": pattern_type,
             "risk_score": round(float(ring["risk_score"]), 2),
         }
         if "density_score" in ring:

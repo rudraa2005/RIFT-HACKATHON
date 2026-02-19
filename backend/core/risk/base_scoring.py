@@ -191,14 +191,16 @@ def compute_scores(
             patterns.append("multi_pattern")
             breakdown["multi_pattern_bonus"] = SCORE_MULTI_PATTERN_BONUS
 
-        # False positive dampeners
+        # False positive dampeners - STRONG penalties to prevent false positives
         if account in merchant_accounts:
-            score += SCORE_MERCHANT_PENALTY
+            # Merchants should be heavily penalized - almost zero risk
+            score = max(0.0, score * 0.1)  # Reduce to 10% of original
             patterns.append("merchant_like")
             breakdown["merchant_penalty"] = SCORE_MERCHANT_PENALTY
 
         if account in payroll_accounts:
-            score += SCORE_PAYROLL_PENALTY
+            # Payroll accounts (both senders and recipients) should be heavily penalized
+            score = max(0.0, score * 0.1)  # Reduce to 10% of original
             patterns.append("payroll_like")
             breakdown["payroll_penalty"] = SCORE_PAYROLL_PENALTY
 
@@ -233,16 +235,39 @@ def compute_scores(
             "pattern_count": core_pattern_count,
         }
 
-    # Second pass: globally normalize + non-linear shaping to avoid linear feel.
-    import math
-
-    max_score = max((data["score"] for data in scores.values()), default=0.0)
-    if max_score > 0:
-        for acct, data in scores.items():
-            base = data["score"] / max_score  # 0–1
-            # Exponential shaping: emphasise higher-risk accounts while keeping smooth.
-            shaped = base ** 0.7
+    # Second pass: percentile-based normalization to avoid clustering at 100
+    import numpy as np
+    
+    all_scores = [data["score"] for data in scores.values() if data["score"] > 0]
+    if not all_scores:
+        return scores
+    
+    # Use 95th percentile as anchor instead of max to prevent clustering
+    p95 = np.percentile(all_scores, 95)
+    p50 = np.percentile(all_scores, 50)
+    
+    for acct, data in scores.items():
+        raw = data["score"]
+        if raw <= 0:
+            data["score"] = 0.0
+            continue
+        
+        # Non-linear mapping: use sigmoid-like curve anchored at p95
+        if p95 > 0:
+            # Normalize relative to p95
+            normalized = min(raw / p95, 1.5)  # Allow some accounts to exceed p95
+            # Apply sigmoid-like transformation for better distribution
+            # Accounts below p50 get compressed, accounts above p95 get emphasized
+            if normalized < 0.5:
+                shaped = normalized * 0.6  # Compress low scores
+            elif normalized < 1.0:
+                shaped = 0.3 + (normalized - 0.5) * 0.5  # Linear middle
+            else:
+                shaped = 0.55 + (normalized - 1.0) * 0.45  # Emphasize high scores
+            
             data["score"] = round(shaped * 100.0, 2)
+        else:
+            data["score"] = round(min(raw, 100.0), 2)
 
     return scores
 
