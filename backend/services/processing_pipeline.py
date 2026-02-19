@@ -286,17 +286,26 @@ class ProcessingService:
         # Deduplicate rings by member set
         # Deduplicate rings: exact match by member set
         seen_member_sets = {}
+        # Deduplicate rings: exact match by member set
+        # Prioritize pattern specificity over raw risk score
+        priority = {"cycle": 5, "fan_in": 4, "fan_out": 4, "shell_chain": 3, "deep_layered_cascade": 2}
+        
+        seen_member_sets: Dict[frozenset, Dict[str, Any]] = {}
         for ring in all_rings:
             key = frozenset(ring["members"])
-            if key not in seen_member_sets or ring["risk_score"] > seen_member_sets[key]["risk_score"]:
+            if key not in seen_member_sets:
                 seen_member_sets[key] = ring
+            else:
+                existing = seen_member_sets[key]
+                p_new = priority.get(ring.get("pattern_type", ""), 0)
+                p_ext = priority.get(existing.get("pattern_type", ""), 0)
+                if p_new > p_ext or (p_new == p_ext and ring["risk_score"] > existing["risk_score"]):
+                    seen_member_sets[key] = ring
         
         deduped_rings = list(seen_member_sets.values())
         # Collapse subset rings: if ring A ⊂ ring B, drop A
-        # We prioritize cycles > smurfing > shell
         final_rings = []
         # Sort by length descending, then by pattern priority
-        priority = {"cycle": 3, "fan_in": 2, "fan_out": 2, "shell_chain": 1}
         sorted_rings = sorted(
             deduped_rings, 
             key=lambda r: (len(r["members"]), priority.get(r.get("pattern_type", ""), 0)), 

@@ -73,15 +73,19 @@ def enhance_ring_risk(
     avg_sub_degree = sum(dict(subgraph_G.degree()).values()) / len(members) if members else 0
     centrality_score = min(100, avg_sub_degree * 20)
 
+    # 6. Ring-Specific Jitter (Ensure unique resolution)
+    # Uses hash of member set to add a tiny, consistent offset (max 0.05)
+    jitter = (hash(frozenset(members)) % 100) / 2000.0
+    
     risk = (
         (base_structural * 0.45) +
         (velocity_score * 0.15) +
         (retention_score * 0.15) +
         (density_score * 0.15) +
-        (centrality_score * 0.1)
+        (centrality_score * 0.1) +
+        jitter
     )
     
-    # Return as float for internal differentiation, rounded at JSON export
     return float(min(100, risk))
 
 
