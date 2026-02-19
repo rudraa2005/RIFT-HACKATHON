@@ -141,6 +141,11 @@ def main():
     closeness_accts, _ = compute_closeness_centrality(G, susp_subset)
     clustering_accts, _ = detect_high_clustering(G, susp_subset)
 
+    logger.info("Computing Global Structural Scores (PageRank, Clustering)...")
+    pr = nx.pagerank(G.to_directed())
+    lc = nx.clustering(nx.Graph(G)) # Local clustering coefficient
+    structural_scores = {acct: {"pagerank": pr.get(acct, 0.0), "local_clustering": lc.get(acct, 0.0)} for acct in G.nodes()}
+
     if is_self_training:
         logger.info("Generating Pseudo-Labels using Rule Engine...")
         from core.risk.base_scoring import compute_scores
@@ -157,8 +162,8 @@ def main():
             rapid_forwarding=forwarding_accts, dormant_activation=dormant_accts,
             structured_fragmentation=structuring_accts
         )
-        # Any account with score > 40 is 'suspicious' for training
-        suspicious_ids = {acct for acct, res in rule_results.items() if res["score"] > 40.0}
+        # Lower threshold for broader behavioral learning (score > 20)
+        suspicious_ids = {acct for acct, res in rule_results.items() if res["score"] > 20.0}
         logger.info("Self-labeling: identified %d suspicious accounts", len(suspicious_ids))
     else:
         # Account Ground Truth (Labeled data)
@@ -168,11 +173,20 @@ def main():
     all_accounts = list(G.nodes())
     y_map = {acct: (1 if acct in suspicious_ids else 0) for acct in all_accounts}
 
-    # Sampling ACCOUNTS to balance training (Better balancing: 1:3 ratio)
+    # Sampling ACCOUNTS to balance training
     pos_accts = [a for a in all_accounts if y_map[a] == 1]
     neg_accts = [a for a in all_accounts if y_map[a] == 0]
     
-    sampled_neg = np.random.choice(neg_accts, min(len(neg_accts), len(pos_accts) * 3), replace=False)
+    # Ensure we have at least SOME training data
+    if not pos_accts:
+        logger.warning("No suspicious accounts found! Training on most active negative accounts as pseudo-positives.")
+        # Fallback: take top 2% of accounts by transaction count
+        active_counts = df["sender_id"].value_counts().add(df["receiver_id"].value_counts(), fill_value=0)
+        top_active = active_counts.nlargest(int(len(all_accounts) * 0.05)).index.tolist()
+        pos_accts = [a for a in top_active if a in all_accounts]
+        for a in pos_accts: y_map[a] = 1
+
+    sampled_neg = np.random.choice(neg_accts, min(len(neg_accts), max(100, len(pos_accts) * 3)), replace=False)
     training_accts = set(pos_accts) | set(sampled_neg)
     
     logger.info("Constructing feature vectors for %d sampled accounts...", len(training_accts))
