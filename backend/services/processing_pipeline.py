@@ -639,8 +639,8 @@ class ProcessingService:
                     new_score = float(scaled_scores[idx])
                     
                     # 4. TOP-END COMPRESSION: Prevent broad 99.x saturation
-                    if new_score > 95.0:
-                        new_score = 95.0 + (new_score - 95.0) * 0.2
+                    if new_score > 98.0:
+                        new_score = 98.0 + (new_score - 98.0) * 0.5
                     
                     # 5. PROPORTIONAL RISK INJECTION: Replace fixed floor clustering
                     # Uses ring risk to inject a proportional baseline rather than a hard wall.
@@ -648,7 +648,7 @@ class ProcessingService:
                         r_risk = account_ring_risk.get(aid, 0)
                         # Inject 20% of ring risk as a baseline buffer (+ small jitter)
                         proportional_boost = r_risk * 0.2
-                        jitter = (hash(aid) % 100) / 50.0 # 0 to 2 points of jitter
+                        jitter = (hash(aid) % 100) / 20.0 # 0 to 5 points of jitter for more variance
                         new_score = max(new_score, proportional_boost + jitter)
                         
                     final_score = round(float(new_score), 2)

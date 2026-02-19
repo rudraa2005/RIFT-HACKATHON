@@ -158,12 +158,20 @@ def compute_scores(
         "structured_fragmentation": structured_fragmentation,
     }
 
+    # Compute total volume per account
+    sender_volumes = df.groupby("sender_id")["amount"].sum()
+    receiver_volumes = df.groupby("receiver_id")["amount"].sum()
+    total_volumes = sender_volumes.add(receiver_volumes, fill_value=0)
+
     for account in all_accounts:
         score = 0.0
         patterns: list[str] = []
         breakdown: Dict[str, float] = {}
         timeline: List[Dict[str, str]] = []
         pattern_count = 0
+
+        # Add total volume to breakdown
+        breakdown["total_amount"] = float(total_volumes.get(account, 0.0))
 
         for p_name, p_set in pattern_map.items():
             if account in p_set:
@@ -174,7 +182,7 @@ def compute_scores(
                 pattern_count += 1
                 
                 event_time = trigger_times.get(p_name, {}).get(account, "Unknown")
-                timeline.append({"time": event_time, "event": p_name.replace("_", " ").title()})
+                timeline.append({"timestamp": event_time, "event": p_name.replace("_", " ").title()})
 
         # Add Anomaly Score from Isolation Forest (up to 40 points)
         if account in anomaly_scores:
@@ -183,9 +191,9 @@ def compute_scores(
                 score += a_score
                 patterns.append("behavioral_anomaly")
                 breakdown["behavioral_anomaly"] = round(a_score, 2)
-                timeline.append({"time": "Analysis Time", "event": "Behavioral Anomaly Detected"})
+                timeline.append({"timestamp": "Analysis Time", "event": "Behavioral Anomaly Detected"})
 
-        timeline.sort(key=lambda x: x["time"])
+        timeline.sort(key=lambda x: x["timestamp"])
 
         if pattern_count >= 2:
             score += SCORE_MULTI_PATTERN_BONUS
