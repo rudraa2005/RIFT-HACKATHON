@@ -35,6 +35,7 @@ def enhance_ring_risk(
     density: float,
     scores: Dict[str, Dict[str, Any]],
     high_velocity: Set[str],
+    G: nx.MultiDiGraph,
 ) -> float:
     """
     Enhanced ring risk = 
@@ -94,7 +95,7 @@ def finalize_ring_risks(
     for ring in all_rings:
         density = compute_ring_density(G, ring)
         ring["density_score"] = density
-        ring["risk_score"] = enhance_ring_risk(ring, density, scores, high_velocity)
+        ring["risk_score"] = enhance_ring_risk(ring, density, scores, high_velocity, G)
         if density > RING_DENSITY_THRESHOLD:
             ring["risk_score"] = round(
                 min(100, ring["risk_score"] * (1 + RING_DENSITY_BONUS_PERCENT / 100)),
