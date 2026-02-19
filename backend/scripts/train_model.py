@@ -76,6 +76,9 @@ def extract_schema_signals(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     return signals
 
 def main():
+    dataset_path = sys.argv[1] if len(sys.argv) > 1 else "data/synthetic_transactions_60neg_40pos.csv"
+    test_path = "data/financial_transactions_10000.csv"
+    
     if not os.path.exists(dataset_path):
         logger.warning("Primary dataset not found. Falling back to SELF-TRAINING mode using: %s", test_path)
         dataset_path = test_path
