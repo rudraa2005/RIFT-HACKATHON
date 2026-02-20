@@ -13,9 +13,9 @@ services:
       - key: MAX_TRANSACTIONS
         value: 100000
       - key: ANOMALY_SKIP_TX_THRESHOLD
-        value: 50000
+        value: 2500
       - key: CENTRALITY_SKIP_TX_THRESHOLD
-        value: 50000
+        value: 1200
       - key: MAX_GRAPH_NODES_RESPONSE
         value: 800
       - key: MAX_GRAPH_EDGES_RESPONSE

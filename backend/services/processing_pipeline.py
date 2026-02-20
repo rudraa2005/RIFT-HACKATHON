@@ -167,334 +167,376 @@ class ProcessingService:
         # 0. Start Timer
         t_start = time.time()
         
-        # Removed sampling to satisfy user requirement for analyzing ALL data.
-        # However, we will use hard timeouts per module to keep total time under 30s.
-
-        # 0.5 Compute Adaptive Thresholds
-        thresholds = compute_adaptive_thresholds(df)
-        logger.info("Adaptive thresholds computed: %s", thresholds)
-
-        # 1. Build graph
-        t0 = time.time()
-        G = build_graph(df)
-        total_accounts = G.number_of_nodes()
-
-        # Forensic trigger maps (account_id -> timestamp_str)
+        # 0.1 DEFENSIVE INITIALIZATION: Pre-define all variables to prevent NameErrors
+        # in case of early skips or unexpected errors.
         trigger_times: Dict[str, Dict[str, str]] = {}
-
-        # 2. Cycle detection
-        with log_timer("cycle_detection"):
-            cycle_rings = detect_cycles(G, df)
-            cycle_accounts: set = set()
-            cycle_triggers: Dict[str, str] = {}
-            for ring in cycle_rings:
-                cycle_accounts.update(ring["members"])
-                for member in ring["members"]:
-                    if member not in cycle_triggers:
-                        cycle_triggers[member] = str(df["timestamp"].max())
-            trigger_times["cycle"] = cycle_triggers
-
-        # 3. Smurfing detection
-        with log_timer("smurfing_detection"):
-            smurf_rings, aggregators, dispersers, smurf_triggers = detect_smurfing(
-                df,
-                min_senders_override=thresholds["smurfing_min_senders"],
-                min_receivers_override=thresholds["smurfing_min_receivers"],
-            )
-            trigger_times.update(smurf_triggers)
-
-        # 4. Shell chain detection
-        with log_timer("shell_chain_detection"):
-            shell_rings, shell_accounts = detect_shell_chains(G, df, exclude_nodes=cycle_accounts)
-            trigger_times["shell_account"] = {
-                acct: str(df["timestamp"].max()) for acct in shell_accounts
-            }
-
-        # 5. Rapid pass-through detection
-        rapid_pt_accounts, _ = detect_rapid_pass_through(df)
-        trigger_times["rapid_pass_through"] = {
-            acct: str(df["timestamp"].max()) for acct in rapid_pt_accounts
-        }
-
-        # 5.5 Rapid forwarding (forensic)
-        forwarding_accounts, _ = detect_rapid_forwarding(df)
-        trigger_times["rapid_forwarding"] = {
-            acct: str(df["timestamp"].max()) for acct in forwarding_accounts
-        }
-
-        # 6. Activity spike detection
-        spike_data = detect_activity_spikes(
-            df, min_txns_override=thresholds["spike_min_txns"]
-        )
-        spike_accounts, spike_triggers = spike_data
-        trigger_times["sudden_activity_spike"] = spike_triggers
-
-        # 6.5 Dormant activation
-        dormant_accounts = detect_dormant_activation(df)
-        trigger_times["dormant_activation_spike"] = {
-            acct: str(df["timestamp"].max()) for acct in dormant_accounts
-        }
-
-        # 6.6 Amount structuring
-        structuring_accounts = detect_amount_structuring(df)
-        trigger_times["structured_fragmentation"] = {
-            acct: str(df["timestamp"].max()) for acct in structuring_accounts
-        }
-
-        # 7. Betweenness centrality (HEAVY)
+        cycle_rings = []
+        cycle_accounts = set()
+        smurf_rings = []
+        aggregators = set()
+        dispersers = set()
+        shell_rings = []
+        shell_accounts = set()
+        rapid_pt_accounts = set()
+        forwarding_accounts = set()
+        spike_accounts = set()
+        dormant_accounts = set()
+        structuring_accounts = set()
         centrality_accounts = set()
-        with log_timer("betweenness_centrality"):
-            if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
-                centrality_accounts, _ = compute_centrality(G)
-            else:
-                logger.info("Skipping betweenness centrality for performance.")
-
-        # 8. Net retention ratio
-        retention_accounts = detect_low_retention(df)
-
-        # 9. Throughput + balance oscillation
-        throughput_accounts = detect_high_throughput(df)
-        oscillation_accounts = detect_balance_oscillation(df)
-
-        # 10. Sender diversity burst
-        diversity_accounts, diversity_triggers = detect_burst_diversity(df)
-        trigger_times["high_burst_diversity"] = diversity_triggers
-
-        # 11. SCC detection
-        scc_accounts, scc_rings = detect_scc(G)
-        trigger_times["large_scc_membership"] = {
-            acct: str(df["timestamp"].max()) for acct in scc_accounts
-        }
-
-        # 12. Cascade depth
-        cascade_rings, cascade_accounts = detect_cascade_depth(G, df)
-        trigger_times["deep_layered_cascade"] = {
-            acct: str(df["timestamp"].max()) for acct in cascade_accounts
-        }
-
-        # 13. Activity consistency variance
-        irregular_accounts = detect_irregular_activity(df)
-
-        # 14. False positive detection
-        merchant_accounts, payroll_accounts = detect_false_positives(df)
-
-        # 14.5 Unsupervised Anomaly Detection (Isolation Forest)
-        with log_timer("anomaly_detection"):
-            if len(df) >= ANOMALY_SKIP_TX_THRESHOLD:
-                anomaly_scores = {}
-            else:
-                txn_anomaly_scores = detect_anomalies(df)
-                anomaly_scores = aggregate_anomaly_scores(df, txn_anomaly_scores)
-
-        # 15. Compute scores (all patterns)
-        t_score = time.time()
-        raw_scores = compute_scores(
-            df=df,
-            cycle_accounts=cycle_accounts,
-            aggregators=aggregators,
-            dispersers=dispersers,
-            shell_accounts=shell_accounts,
-            merchant_accounts=merchant_accounts,
-            payroll_accounts=payroll_accounts,
-            rapid_pass_through=rapid_pt_accounts,
-            activity_spike=spike_accounts,
-            high_centrality=centrality_accounts,
-            low_retention=retention_accounts,
-            high_throughput=throughput_accounts,
-            balance_oscillation=oscillation_accounts,
-            burst_diversity=diversity_accounts,
-            scc_members=scc_accounts,
-            cascade_depth=cascade_accounts,
-            irregular_activity=irregular_accounts,
-            rapid_forwarding=forwarding_accounts,
-            dormant_activation=dormant_accounts,
-            structured_fragmentation=structuring_accounts,
-            anomaly_scores=anomaly_scores,
-            trigger_times=trigger_times,
-        )
-
-        # 16. Use raw scores for propagation (Removed normalize_scores to prevent clamping)
-        normalized = raw_scores 
-
-        # 17. Risk propagation (graph-based)
-        with log_timer("risk_propagation"):
-            normalized = propagate_risk(G, normalized)
-
-        # 18. Build neighbor map for connectivity analysis
-        neighbor_map = build_neighbor_map(df)
-
-        # 19. Closeness centrality on suspicious subgraph (HEAVY)
         closeness_accounts = set()
-        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
-            suspicious_set = {
-                acct for acct, data in normalized.items() if data["score"] > 0
-            }
-            closeness_accounts, _ = compute_closeness_centrality(G, suspicious_set)
-        else:
-            logger.info("Skipping closeness centrality for performance.")
-
-        # 20. Local clustering on suspicious subgraph (HEAVY)
         clustering_accounts = set()
-        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
-            suspicious_set = {
-                acct for acct, data in normalized.items() if data["score"] > 0
+        retention_accounts = set()
+        throughput_accounts = set()
+        oscillation_accounts = set()
+        diversity_accounts = set()
+        scc_accounts = set()
+        scc_rings = []
+        cascade_accounts = set()
+        cascade_rings = []
+        irregular_accounts = set()
+        merchant_accounts = set()
+        payroll_accounts = set()
+        anomaly_scores = {}
+        neighbor_map = {}
+        all_rings = []
+        all_ring_members = set()
+        all_accounts = set(df["sender_id"].unique()) | set(df["receiver_id"].unique())
+        normalized: Dict[str, Dict[str, Any]] = {}
+        raw_scores: Dict[str, Dict[str, Any]] = {}
+        
+        try:
+            # 0.5 Compute Adaptive Thresholds
+            thresholds = compute_adaptive_thresholds(df)
+            logger.info("Adaptive thresholds computed: %s", thresholds)
+
+            # 1. Build graph
+            G = build_graph(df)
+            total_accounts = G.number_of_nodes()
+
+            # Forensic trigger maps (account_id -> timestamp_str)
+            trigger_times: Dict[str, Dict[str, str]] = {}
+
+            # 2. Cycle detection
+            with log_timer("cycle_detection"):
+                cycle_rings = detect_cycles(G, df)
+                cycle_accounts: set = set()
+                cycle_triggers: Dict[str, str] = {}
+                for ring in cycle_rings:
+                    cycle_accounts.update(ring["members"])
+                    for member in ring["members"]:
+                        if member not in cycle_triggers:
+                            cycle_triggers[member] = str(df["timestamp"].max())
+                trigger_times["cycle"] = cycle_triggers
+
+            # 3. Smurfing detection
+            with log_timer("smurfing_detection"):
+                smurf_rings, aggregators, dispersers, smurf_triggers = detect_smurfing(
+                    df,
+                    min_senders_override=thresholds["smurfing_min_senders"],
+                    min_receivers_override=thresholds["smurfing_min_receivers"],
+                )
+                trigger_times.update(smurf_triggers)
+
+            # 4. Shell chain detection
+            with log_timer("shell_chain_detection"):
+                shell_rings, shell_accounts = detect_shell_chains(G, df, exclude_nodes=cycle_accounts)
+                trigger_times["shell_account"] = {
+                    acct: str(df["timestamp"].max()) for acct in shell_accounts
+                }
+
+            # 5. Rapid pass-through detection
+            rapid_pt_accounts, _ = detect_rapid_pass_through(df)
+            trigger_times["rapid_pass_through"] = {
+                acct: str(df["timestamp"].max()) for acct in rapid_pt_accounts
             }
-            clustering_accounts, _ = detect_high_clustering(G, suspicious_set)
-        else:
-            logger.info("Skipping local clustering for performance.")
 
-        # Add closeness & clustering patterns post-propagation (reduced weight)
-        for acct in closeness_accounts:
-            if acct in normalized:
-                normalized[acct]["score"] = min(
-                    100, normalized[acct]["score"] + 5
-                )
-                if "high_closeness_centrality" not in normalized[acct]["patterns"]:
-                    normalized[acct]["patterns"].append("high_closeness_centrality")
+            # 5.5 Rapid forwarding (forensic)
+            forwarding_accounts, _ = detect_rapid_forwarding(df)
+            trigger_times["rapid_forwarding"] = {
+                acct: str(df["timestamp"].max()) for acct in forwarding_accounts
+            }
 
-        for acct in clustering_accounts:
-            if acct in normalized:
-                normalized[acct]["score"] = min(
-                    100, normalized[acct]["score"] + 5
-                )
-                if "high_local_clustering" not in normalized[acct]["patterns"]:
-                    normalized[acct]["patterns"].append("high_local_clustering")
+            # 6. Activity spike detection
+            spike_data = detect_activity_spikes(
+                df, min_txns_override=thresholds["spike_min_txns"]
+            )
+            spike_accounts, spike_triggers = spike_data
+            trigger_times["sudden_activity_spike"] = spike_triggers
 
-        # 21. Combine all rings (SCC excluded — it's a supplementary pattern, not a ring)
-        all_rings = cycle_rings + smurf_rings + shell_rings + cascade_rings
+            # 6.5 Dormant activation
+            dormant_accounts = detect_dormant_activation(df)
+            trigger_times["dormant_activation_spike"] = {
+                acct: str(df["timestamp"].max()) for acct in dormant_accounts
+            }
 
-        # Deduplicate rings by member set
-        # Deduplicate rings: exact match by member set
-        seen_member_sets = {}
-        # Deduplicate rings: exact match by member set
-        # Prioritize pattern specificity over raw risk score
-        priority = {"cycle": 5, "fan_in": 4, "fan_out": 4, "shell_chain": 3, "deep_layered_cascade": 2}
-        
-        seen_member_sets: Dict[frozenset, Dict[str, Any]] = {}
-        for ring in all_rings:
-            key = frozenset(ring["members"])
-            if key not in seen_member_sets:
-                seen_member_sets[key] = ring
+            # 6.6 Amount structuring
+            structuring_accounts = detect_amount_structuring(df)
+            trigger_times["structured_fragmentation"] = {
+                acct: str(df["timestamp"].max()) for acct in structuring_accounts
+            }
+
+            # 7. Betweenness centrality (HEAVY)
+            centrality_accounts = set()
+            with log_timer("betweenness_centrality"):
+                if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
+                    centrality_accounts, _ = compute_centrality(G)
+                else:
+                    logger.info("Skipping betweenness centrality for performance.")
+
+            # 8. Net retention ratio
+            retention_accounts = detect_low_retention(df)
+
+            # 9. Throughput + balance oscillation
+            throughput_accounts = detect_high_throughput(df)
+            oscillation_accounts = detect_balance_oscillation(df)
+
+            # 10. Sender diversity burst
+            diversity_accounts, diversity_triggers = detect_burst_diversity(df)
+            trigger_times["high_burst_diversity"] = diversity_triggers
+
+            # 11. SCC detection
+            scc_accounts, scc_rings = detect_scc(G)
+            trigger_times["large_scc_membership"] = {
+                acct: str(df["timestamp"].max()) for acct in scc_accounts
+            }
+
+            # 12. Cascade depth
+            cascade_rings, cascade_accounts = detect_cascade_depth(G, df)
+            trigger_times["deep_layered_cascade"] = {
+                acct: str(df["timestamp"].max()) for acct in cascade_accounts
+            }
+
+            # 13. Activity consistency variance
+            irregular_accounts = detect_irregular_activity(df)
+
+            # 14. False positive detection
+            merchant_accounts, payroll_accounts = detect_false_positives(df)
+
+            # 14.5 Unsupervised Anomaly Detection (Isolation Forest)
+            with log_timer("anomaly_detection"):
+                if len(df) >= ANOMALY_SKIP_TX_THRESHOLD:
+                    anomaly_scores = {}
+                else:
+                    txn_anomaly_scores = detect_anomalies(df)
+                    anomaly_scores = aggregate_anomaly_scores(df, txn_anomaly_scores)
+
+            # 15. Compute scores (all patterns)
+            t_score = time.time()
+            raw_scores = compute_scores(
+                df=df,
+                cycle_accounts=cycle_accounts,
+                aggregators=aggregators,
+                dispersers=dispersers,
+                shell_accounts=shell_accounts,
+                merchant_accounts=merchant_accounts,
+                payroll_accounts=payroll_accounts,
+                rapid_pass_through=rapid_pt_accounts,
+                activity_spike=spike_accounts,
+                high_centrality=centrality_accounts,
+                low_retention=retention_accounts,
+                high_throughput=throughput_accounts,
+                balance_oscillation=oscillation_accounts,
+                burst_diversity=diversity_accounts,
+                scc_members=scc_accounts,
+                cascade_depth=cascade_accounts,
+                irregular_activity=irregular_accounts,
+                rapid_forwarding=forwarding_accounts,
+                dormant_activation=dormant_accounts,
+                structured_fragmentation=structuring_accounts,
+                anomaly_scores=anomaly_scores,
+                trigger_times=trigger_times,
+            )
+
+            # 16. Use raw scores for propagation (Removed normalize_scores to prevent clamping)
+            normalized = raw_scores 
+
+            # 17. Risk propagation (graph-based)
+            with log_timer("risk_propagation"):
+                normalized = propagate_risk(G, normalized)
+
+            # 18. Build neighbor map for connectivity analysis
+            neighbor_map = build_neighbor_map(df)
+
+            # 19. Closeness centrality on suspicious subgraph (HEAVY)
+            closeness_accounts = set()
+            if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
+                suspicious_set = {
+                    acct for acct, data in normalized.items() if data["score"] > 0
+                }
+                closeness_accounts, _ = compute_closeness_centrality(G, suspicious_set)
             else:
-                existing = seen_member_sets[key]
-                p_new = priority.get(ring.get("pattern_type", ""), 0)
-                p_ext = priority.get(existing.get("pattern_type", ""), 0)
-                if p_new > p_ext or (p_new == p_ext and ring["risk_score"] > existing["risk_score"]):
+                logger.info("Skipping closeness centrality for performance.")
+
+            # 20. Local clustering on suspicious subgraph (HEAVY)
+            clustering_accounts = set()
+            if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
+                suspicious_set = {
+                    acct for acct, data in normalized.items() if data["score"] > 0
+                }
+                clustering_accounts, _ = detect_high_clustering(G, suspicious_set)
+            else:
+                logger.info("Skipping local clustering for performance.")
+
+            # Add closeness & clustering patterns post-propagation (reduced weight)
+            for acct in closeness_accounts:
+                if acct in normalized:
+                    normalized[acct]["score"] = min(
+                        100, normalized[acct]["score"] + 5
+                    )
+                    if "high_closeness_centrality" not in normalized[acct]["patterns"]:
+                        normalized[acct]["patterns"].append("high_closeness_centrality")
+
+            for acct in clustering_accounts:
+                if acct in normalized:
+                    normalized[acct]["score"] = min(
+                        100, normalized[acct]["score"] + 5
+                    )
+                    if "high_local_clustering" not in normalized[acct]["patterns"]:
+                        normalized[acct]["patterns"].append("high_local_clustering")
+
+            # 21. Combine all rings (SCC excluded — it's a supplementary pattern, not a ring)
+            all_rings = cycle_rings + smurf_rings + shell_rings + cascade_rings
+
+            # Deduplicate rings by member set
+            # Deduplicate rings: exact match by member set
+            seen_member_sets = {}
+            # Deduplicate rings: exact match by member set
+            # Prioritize pattern specificity over raw risk score
+            priority = {"cycle": 5, "fan_in": 4, "fan_out": 4, "shell_chain": 3, "deep_layered_cascade": 2}
+            
+            seen_member_sets: Dict[frozenset, Dict[str, Any]] = {}
+            for ring in all_rings:
+                key = frozenset(ring["members"])
+                if key not in seen_member_sets:
                     seen_member_sets[key] = ring
-        
-        deduped_rings = list(seen_member_sets.values())
-        # Collapse subset rings: if ring A ⊂ ring B, drop A
-        final_rings = []
-        # Sort by length descending, then by pattern priority
-        sorted_rings = sorted(
-            deduped_rings, 
-            key=lambda r: (len(r["members"]), priority.get(r.get("pattern_type", ""), 0)), 
-            reverse=True
-        )
-
-        for ring in sorted_rings:
-            ring_set = frozenset(ring["members"])
-            is_subset = False
-            for other in final_rings:
-                if ring_set <= frozenset(other["members"]):
-                    is_subset = True
-                    break
-            if not is_subset:
-                final_rings.append(ring)
-        
-        # 21.5 Super-Deduplication: Collapse rings with high Jaccard overlap
-        merged_rings = []
-        # Priority: cycle > smurf > shell > cascade
-        # Sort by length descending then priority
-        priority = {"cycle": 4, "fan_in": 3, "fan_out": 3, "shell_chain": 2, "deep_layered_cascade": 1}
-        final_rings.sort(
-            key=lambda r: (len(r["members"]), priority.get(r.get("pattern_type", ""), 0)), 
-            reverse=True
-        )
-        
-        for ring in final_rings:
-            m_set = set(ring["members"])
-            if not m_set: continue
-            is_redundant = False
-            for other in merged_rings:
-                o_set = set(other["members"])
-                intersection = m_set & o_set
-                # If >70% overlap with an existing (larger or higher priority) ring, skip
-                if len(intersection) / len(m_set) >= 0.7:
-                    is_redundant = True
-                    break
-            if not is_redundant:
-                merged_rings.append(ring)
-        
-        # 21.6 Re-sequence IDs: sequential numbering per type + group ID extraction
-        counters = {}
-        for ring in merged_rings:
-            raw_p = ring.get("pattern_type", "UNKNOWN")
-            if "fan" in raw_p or "smurf" in raw_p:
-                p_type = "SMURF"
-            elif "shell" in raw_p:
-                p_type = "SHELL"
-            elif "cycle" in raw_p:
-                p_type = "CYCLE"
-            elif "cascade" in raw_p:
-                p_type = "CASCADE"
-            else:
-                p_type = raw_p.split("_")[0].upper()
+                else:
+                    existing = seen_member_sets[key]
+                    p_new = priority.get(ring.get("pattern_type", ""), 0)
+                    p_ext = priority.get(existing.get("pattern_type", ""), 0)
+                    if p_new > p_ext or (p_new == p_ext and ring["risk_score"] > existing["risk_score"]):
+                        seen_member_sets[key] = ring
             
-            # Extract Group ID from members (e.g., 'MULE_A_2' -> '2')
-            group_id = ""
-            member_ids = []
-            for m in ring["members"]:
-                parts = str(m).split("_")
-                for p in parts:
-                    if p.isdigit():
-                        member_ids.append(p)
+            deduped_rings = list(seen_member_sets.values())
+            # Collapse subset rings: if ring A ⊂ ring B, drop A
+            final_rings = []
+            # Sort by length descending, then by pattern priority
+            sorted_rings = sorted(
+                deduped_rings, 
+                key=lambda r: (len(r["members"]), priority.get(r.get("pattern_type", ""), 0)), 
+                reverse=True
+            )
+
+            for ring in sorted_rings:
+                ring_set = frozenset(ring["members"])
+                is_subset = False
+                for other in final_rings:
+                    if ring_set <= frozenset(other["members"]):
+                        is_subset = True
                         break
-            if member_ids and len(set(member_ids)) == 1:
-                group_id = member_ids[0]
+                if not is_subset:
+                    final_rings.append(ring)
             
-            if group_id:
-                ring["ring_id"] = f"RING_{p_type}_{group_id}"
-            else:
-                counters[p_type] = counters.get(p_type, 0) + 1
-                ring["ring_id"] = f"RING_{p_type}_{counters[p_type]:03d}"
-        
-        all_rings = merged_rings
+            # 21.5 Super-Deduplication: Collapse rings with high Jaccard overlap
+            merged_rings = []
+            # Priority: cycle > smurf > shell > cascade
+            # Sort by length descending then priority
+            priority = {"cycle": 4, "fan_in": 3, "fan_out": 3, "shell_chain": 2, "deep_layered_cascade": 1}
+            final_rings.sort(
+                key=lambda r: (len(r["members"]), priority.get(r.get("pattern_type", ""), 0)), 
+                reverse=True
+            )
+            
+            for ring in final_rings:
+                m_set = set(ring["members"])
+                if not m_set: continue
+                is_redundant = False
+                for other in merged_rings:
+                    o_set = set(other["members"])
+                    intersection = m_set & o_set
+                    # If >70% overlap with an existing (larger or higher priority) ring, skip
+                    if len(intersection) / len(m_set) >= 0.7:
+                        is_redundant = True
+                        break
+                if not is_redundant:
+                    merged_rings.append(ring)
+            
+            # 21.6 Re-sequence IDs: sequential numbering per type + group ID extraction
+            counters = {}
+            for ring in merged_rings:
+                raw_p = ring.get("pattern_type", "UNKNOWN")
+                if "fan" in raw_p or "smurf" in raw_p:
+                    p_type = "SMURF"
+                elif "shell" in raw_p:
+                    p_type = "SHELL"
+                elif "cycle" in raw_p:
+                    p_type = "CYCLE"
+                elif "cascade" in raw_p:
+                    p_type = "CASCADE"
+                else:
+                    p_type = raw_p.split("_")[0].upper()
+                
+                # Extract Group ID from members (e.g., 'MULE_A_2' -> '2')
+                group_id = ""
+                member_ids = []
+                for m in ring["members"]:
+                    parts = str(m).split("_")
+                    for p in parts:
+                        if p.isdigit():
+                            member_ids.append(p)
+                            break
+                if member_ids and len(set(member_ids)) == 1:
+                    group_id = member_ids[0]
+                
+                if group_id:
+                    ring["ring_id"] = f"RING_{p_type}_{group_id}"
+                else:
+                    counters[p_type] = counters.get(p_type, 0) + 1
+                    ring["ring_id"] = f"RING_{p_type}_{counters[p_type]:03d}"
+            
+            all_rings = merged_rings
 
-        high_velocity: Set[str] = set()
-        for acct, data in normalized.items():
-            if "high_velocity" in data.get("patterns", []):
-                high_velocity.add(acct)
+            high_velocity: Set[str] = set()
+            for acct, data in normalized.items():
+                if "high_velocity" in data.get("patterns", []):
+                    high_velocity.add(acct)
 
-        all_rings = finalize_ring_risks(G, all_rings, normalized, high_velocity)
+            all_rings = finalize_ring_risks(G, all_rings, normalized, high_velocity)
 
-        # 21.7 Inject behavioral tags from ring member_patterns
-        for ring in all_rings:
-            m_patterns = ring.get("member_patterns", {})
-            for acct_id, patterns in m_patterns.items():
-                if acct_id in normalized:
-                    existing = set(normalized[acct_id].get("patterns", []))
-                    existing.update(patterns)
-                    normalized[acct_id]["patterns"] = sorted(list(existing))
+            # 21.7 Inject behavioral tags from ring member_patterns
+            for ring in all_rings:
+                m_patterns = ring.get("member_patterns", {})
+                for acct_id, patterns in m_patterns.items():
+                    if acct_id in normalized:
+                        existing = set(normalized[acct_id].get("patterns", []))
+                        existing.update(patterns)
+                        normalized[acct_id]["patterns"] = sorted(list(existing))
 
-        # 23. ML inference + hybrid scoring
-        ml_scores = None
-        model = None
-        if ML_ENABLED:
-            model_path = _resolve_model_path()
-            try:
-                model = _get_cached_model(model_path)
-                if model is None:
-                    logger.warning("ML model unavailable at %s; using rule-only scoring", model_path)
-            except Exception as e:
-                logger.warning(
-                    "ML scoring unavailable, falling back to rule-only: %s", e
-                )
-                model = None
+            # 23. ML inference + hybrid scoring
+            ml_scores = None
+            model = None
+            if ML_ENABLED:
+                model_path = _resolve_model_path()
+                try:
+                    model = _get_cached_model(model_path)
+                    if model is None:
+                        logger.warning("ML model unavailable at %s; using rule-only scoring", model_path)
+                except Exception as e:
+                    logger.warning(
+                        "ML scoring unavailable, falling back to rule-only: %s", e
+                    )
+                    model = None
+
+        except Exception as global_exc:
+            logger.critical("Critical error in processing pipeline: %s. Returning partial results.", str(global_exc))
+            # If G wasn't built, build it now or return empty
+            if 'G' not in locals():
+                G = nx.MultiDiGraph()
+            total_accounts = G.number_of_nodes()
 
         # 22. ML Risk Scoring (High-Speed Inference with 20s Bailout)
         ml_scores = None
         if ML_ENABLED:
+            all_accounts = set(normalized.keys())
             with log_timer("ml_feature_vector_building"):
                 feature_vectors, account_list = build_feature_vectors(
                     all_accounts=all_accounts,
