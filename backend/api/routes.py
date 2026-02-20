@@ -59,7 +59,10 @@ async def upload_csv(file: UploadFile = File(...)):
 
     try:
         contents = await file.read()
-        df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
+        df = pd.read_csv(
+            io.BytesIO(contents),
+            parse_dates=["timestamp"],
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
 

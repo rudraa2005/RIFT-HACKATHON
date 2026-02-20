@@ -82,7 +82,10 @@ from app.config import ML_ENABLED, ML_MODEL_PATH
 logger = logging.getLogger(__name__)
 
 # Maximum transactions to process (performance requirement: <= 30s)
-MAX_TRANSACTIONS = 5_000
+MAX_TRANSACTIONS = int(os.getenv("MAX_TRANSACTIONS", "3500"))
+FAST_MODE_TX_THRESHOLD = int(os.getenv("FAST_MODE_TX_THRESHOLD", "2500"))
+MAX_GRAPH_NODES_RESPONSE = int(os.getenv("MAX_GRAPH_NODES_RESPONSE", "1200"))
+MAX_GRAPH_EDGES_RESPONSE = int(os.getenv("MAX_GRAPH_EDGES_RESPONSE", "2200"))
 
 _MODEL_CACHE_LOCK = threading.Lock()
 _CACHED_MODEL_PATH: str | None = None
@@ -115,6 +118,24 @@ def _get_cached_model(model_path: str) -> RiskModel | None:
         _CACHED_MODEL = model
         _CACHED_MODEL_PATH = model_path
         return _CACHED_MODEL
+
+
+def _cache_runtime_model(model: RiskModel) -> None:
+    global _CACHED_MODEL, _CACHED_MODEL_PATH
+    with _MODEL_CACHE_LOCK:
+        _CACHED_MODEL = model
+        _CACHED_MODEL_PATH = "__runtime_trained__"
+
+
+def warmup_ml_model() -> bool:
+    """Best-effort ML warmup during app startup."""
+    if not ML_ENABLED:
+        return False
+    try:
+        model = _get_cached_model(_resolve_model_path())
+        return model is not None
+    except Exception:
+        return False
 
 
 class ProcessingService:
@@ -244,9 +265,14 @@ class ProcessingService:
         merchant_accounts, payroll_accounts = detect_false_positives(df)
 
         # 14.5 Unsupervised Anomaly Detection (Isolation Forest)
+        # Skip for very large datasets in fast mode to keep deployment latency bounded.
         t_ml = time.time()
-        txn_anomaly_scores = detect_anomalies(df)
-        anomaly_scores = aggregate_anomaly_scores(df, txn_anomaly_scores)
+        fast_mode = len(df) >= FAST_MODE_TX_THRESHOLD
+        if fast_mode:
+            anomaly_scores = {}
+        else:
+            txn_anomaly_scores = detect_anomalies(df)
+            anomaly_scores = aggregate_anomaly_scores(df, txn_anomaly_scores)
 
         # 15. Compute scores (all patterns)
         t_score = time.time()
@@ -290,11 +316,17 @@ class ProcessingService:
         suspicious_set = {
             acct for acct, data in normalized.items() if data["score"] > 0
         }
-        closeness_accounts, _ = compute_closeness_centrality(G, suspicious_set)
+        if fast_mode:
+            closeness_accounts = set()
+        else:
+            closeness_accounts, _ = compute_closeness_centrality(G, suspicious_set)
 
         # 20. Local clustering on suspicious subgraph
         t_clust = time.time()
-        clustering_accounts, _ = detect_high_clustering(G, suspicious_set)
+        if fast_mode:
+            clustering_accounts = set()
+        else:
+            clustering_accounts, _ = detect_high_clustering(G, suspicious_set)
 
         # Add closeness & clustering patterns post-propagation (reduced weight)
         for acct in closeness_accounts:
@@ -482,6 +514,54 @@ class ProcessingService:
                 for acct, prob in zip(account_list, probs)
             }
             logger.info("ML scoring completed for %d accounts", len(ml_scores))
+        elif ML_ENABLED:
+            # Deployment fallback: bootstrap a lightweight logistic model from rule-based pseudo labels.
+            all_accounts = set(df["sender_id"].unique()) | set(
+                df["receiver_id"].unique()
+            )
+            feature_vectors, account_list = build_feature_vectors(
+                all_accounts=all_accounts,
+                cycle_accounts=cycle_accounts,
+                aggregators=aggregators,
+                dispersers=dispersers,
+                shell_accounts=shell_accounts,
+                high_velocity=high_velocity,
+                rapid_pass_through=rapid_pt_accounts,
+                activity_spike=spike_accounts,
+                high_centrality=centrality_accounts,
+                low_retention=retention_accounts,
+                high_throughput=throughput_accounts,
+                balance_oscillation=oscillation_accounts,
+                burst_diversity=diversity_accounts,
+                scc_members=scc_accounts,
+                cascade_depth=cascade_accounts,
+                irregular_activity=irregular_accounts,
+                high_closeness=closeness_accounts,
+                high_clustering=clustering_accounts,
+                rapid_forwarding=forwarding_accounts,
+                dormant_activation=dormant_accounts,
+                structured_fragmentation=structuring_accounts,
+                G=G,
+                df=df,
+            )
+            X = vectors_to_matrix(feature_vectors, account_list)
+            y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= 50.0 else 0 for a in account_list], dtype=np.int32)
+            if y.sum() == 0 or y.sum() == len(y):
+                # Ensure both classes exist for logistic fit.
+                cutoff = float(np.percentile([normalized.get(a, {}).get("score", 0.0) for a in account_list], 80)) if account_list else 50.0
+                y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= cutoff else 0 for a in account_list], dtype=np.int32)
+            try:
+                bootstrap_model = RiskModel()
+                bootstrap_model.train(X, y)
+                _cache_runtime_model(bootstrap_model)
+                probs = bootstrap_model.predict(X)
+                ml_scores = {
+                    acct: float(prob)
+                    for acct, prob in zip(account_list, probs)
+                }
+                logger.info("Bootstrapped runtime ML model for %d accounts", len(ml_scores))
+            except Exception as e:
+                logger.warning("Runtime ML bootstrap failed; keeping rule-only scoring: %s", e)
 
         normalized = compute_hybrid_scores(normalized, ml_scores)
 
@@ -616,6 +696,22 @@ class ProcessingService:
                 "timestamp": str(data.get("timestamp", "")),
                 "transaction_id": str(data.get("transaction_id", "")),
             })
+
+        # Keep API payload compact for deployment latency.
+        if len(nodes) > MAX_GRAPH_NODES_RESPONSE:
+            top_node_ids = {
+                n["id"]
+                for n in sorted(nodes, key=lambda n: float(n.get("risk_score", 0.0)), reverse=True)[:MAX_GRAPH_NODES_RESPONSE]
+            }
+            nodes = [n for n in nodes if n["id"] in top_node_ids]
+            edges = [e for e in edges if e["source"] in top_node_ids and e["target"] in top_node_ids]
+
+        if len(edges) > MAX_GRAPH_EDGES_RESPONSE:
+            edges = sorted(
+                edges,
+                key=lambda e: float(e.get("amount", 0.0)),
+                reverse=True,
+            )[:MAX_GRAPH_EDGES_RESPONSE]
 
         graph_data = {
             "nodes": nodes,

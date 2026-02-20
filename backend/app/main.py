@@ -7,6 +7,7 @@ Endpoints:
     GET  /metrics — Processing statistics
 """
 
+import logging
 import sys
 import os
 
@@ -18,6 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from api.routes import router
+from services.processing_pipeline import warmup_ml_model
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Graph-Based Money Muling Detection Engine",
@@ -38,3 +42,9 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.include_router(router)
+
+
+@app.on_event("startup")
+async def _startup_warmup():
+    ml_ready = warmup_ml_model()
+    logger.info("Startup warmup complete. ml_model_ready=%s", ml_ready)
