@@ -96,7 +96,19 @@ class RiskModel:
             # No trained model loaded: force caller to fall back to rule engine
             logger.error("RiskModel.predict called without a trained model; returning zeros.")
             return np.zeros(X.shape[0], dtype=float)
-            
+
+        X = np.asarray(X, dtype=np.float32)
+        expected_features = getattr(self._scaler, "n_features_in_", None) or getattr(self._model, "n_features_in_", None)
+        if expected_features is not None and X.shape[1] != int(expected_features):
+            target = int(expected_features)
+            if X.shape[1] > target:
+                logger.warning("Feature dimension mismatch (got=%d expected=%d). Truncating extra features.", X.shape[1], target)
+                X = X[:, :target]
+            else:
+                logger.warning("Feature dimension mismatch (got=%d expected=%d). Zero-padding missing features.", X.shape[1], target)
+                pad = np.zeros((X.shape[0], target - X.shape[1]), dtype=X.dtype)
+                X = np.hstack([X, pad])
+
         X_scaled = self._scaler.transform(X)
         return self._model.predict_proba(X_scaled)[:, 1]
 

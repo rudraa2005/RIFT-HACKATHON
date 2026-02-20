@@ -83,7 +83,8 @@ logger = logging.getLogger(__name__)
 
 # Maximum transactions to process (performance requirement: <= 30s)
 MAX_TRANSACTIONS = int(os.getenv("MAX_TRANSACTIONS", "3500"))
-FAST_MODE_TX_THRESHOLD = int(os.getenv("FAST_MODE_TX_THRESHOLD", "2500"))
+ANOMALY_SKIP_TX_THRESHOLD = int(os.getenv("ANOMALY_SKIP_TX_THRESHOLD", "5000"))
+CENTRALITY_SKIP_TX_THRESHOLD = int(os.getenv("CENTRALITY_SKIP_TX_THRESHOLD", "3200"))
 MAX_GRAPH_NODES_RESPONSE = int(os.getenv("MAX_GRAPH_NODES_RESPONSE", "1200"))
 MAX_GRAPH_EDGES_RESPONSE = int(os.getenv("MAX_GRAPH_EDGES_RESPONSE", "2200"))
 
@@ -265,10 +266,9 @@ class ProcessingService:
         merchant_accounts, payroll_accounts = detect_false_positives(df)
 
         # 14.5 Unsupervised Anomaly Detection (Isolation Forest)
-        # Skip for very large datasets in fast mode to keep deployment latency bounded.
+        # Keep enabled for accuracy; skip only beyond explicit high threshold.
         t_ml = time.time()
-        fast_mode = len(df) >= FAST_MODE_TX_THRESHOLD
-        if fast_mode:
+        if len(df) >= ANOMALY_SKIP_TX_THRESHOLD:
             anomaly_scores = {}
         else:
             txn_anomaly_scores = detect_anomalies(df)
@@ -316,14 +316,14 @@ class ProcessingService:
         suspicious_set = {
             acct for acct, data in normalized.items() if data["score"] > 0
         }
-        if fast_mode:
+        if len(df) >= CENTRALITY_SKIP_TX_THRESHOLD:
             closeness_accounts = set()
         else:
             closeness_accounts, _ = compute_closeness_centrality(G, suspicious_set)
 
         # 20. Local clustering on suspicious subgraph
         t_clust = time.time()
-        if fast_mode:
+        if len(df) >= CENTRALITY_SKIP_TX_THRESHOLD:
             clustering_accounts = set()
         else:
             clustering_accounts, _ = detect_high_clustering(G, suspicious_set)
