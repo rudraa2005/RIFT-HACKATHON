@@ -93,10 +93,23 @@ def _cache_runtime_model(model: Any) -> None:
         _CACHED_MODEL_PATH = "__runtime_trained__"
 
 
+def warmup_pipeline() -> None:
+    """Import heavy libraries in the background to avoid first-request lag."""
+    try:
+        import networkx as nx
+        import numpy as np
+        import pandas as pd
+        from scipy.stats import rankdata
+        logger.info("Background library warmup complete.")
+    except Exception as e:
+        logger.warning("Background library warmup partial failure: %s", e)
+
 def warmup_ml_model() -> bool:
     """Best-effort ML warmup during app startup."""
     if not ML_ENABLED:
         return False
+    # Also trigger library warmup
+    warmup_pipeline()
     try:
         model = _get_cached_model(_resolve_model_path())
         return model is not None
@@ -108,6 +121,7 @@ class ProcessingService:
     """Orchestrates the complete money-muling detection pipeline."""
 
     def process(self, df: Any) -> Dict[str, Any]:
+        t_start = time.time()
         import networkx as nx
         import numpy as np
         import pandas as pd
@@ -151,7 +165,7 @@ class ProcessingService:
             return Timer()
 
         df = df.copy()
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        # df["timestamp"] = pd.to_datetime(df["timestamp"]) # Pre-parsed in route
         stage_timings: Dict[str, float] = {}
         _stage_t0 = time.perf_counter()
 
@@ -163,7 +177,6 @@ class ProcessingService:
 
 
         # 0. Compute Adaptive Thresholds
-        t_start = time.time()
         thresholds = compute_adaptive_thresholds(df)
         logger.info("Adaptive thresholds computed: %s", thresholds)
         _mark_stage("adaptive_thresholds")
@@ -287,7 +300,7 @@ class ProcessingService:
             logger.exception("flow_detectors failed")
 
         # 14.5 Heavy Stats (Conditional)
-        if (time.time() - t_start) < 22.0:
+        if (time.time() - t_start) < 20.0:
             if len(df) < CENTRALITY_SKIP_TX_THRESHOLD:
                 with log_timer("betweenness_centrality"):
                     try:
@@ -343,7 +356,7 @@ class ProcessingService:
 
         # 19. Closeness centrality on suspicious subgraph (HEAVY)
         closeness_accounts = set()
-        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
+        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < 22.0:
             suspicious_set = {
                 acct for acct, data in normalized.items() if data["score"] > 0
             }
@@ -353,7 +366,7 @@ class ProcessingService:
 
         # 20. Local clustering on suspicious subgraph (HEAVY)
         clustering_accounts = set()
-        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
+        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < 22.0:
             suspicious_set = {
                 acct for acct, data in normalized.items() if data["score"] > 0
             }
@@ -500,7 +513,7 @@ class ProcessingService:
                     existing.update(patterns)
                     normalized[acct_id]["patterns"] = sorted(list(existing))
 
-        if ML_ENABLED and (time.time() - t_start) < 26.0:
+        if ML_ENABLED and (time.time() - t_start) < 24.0:
             model_path = _resolve_model_path()
             try:
                 model = _get_cached_model(model_path)

@@ -17,8 +17,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-
+import threading
 from api.routes import router
+from services.processing_pipeline import warmup_ml_model
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,5 @@ app.include_router(router)
 
 @app.on_event("startup")
 async def _startup_warmup():
-    # ml_ready = warmup_ml_model() 
-    # logger.info("Startup warmup complete. ml_model_ready=%s", ml_ready)
-    logger.info("App starting up. ML warmup deferred to first request for faster port binding.")
+    logger.info("App starting up. Launching background library warmup...")
+    threading.Thread(target=warmup_ml_model, daemon=True).start()
