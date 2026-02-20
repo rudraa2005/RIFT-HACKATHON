@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # Maximum transactions to process (performance requirement: <= 30s)
 MAX_TRANSACTIONS = int(os.getenv("MAX_TRANSACTIONS", "10000"))
 ANOMALY_SKIP_TX_THRESHOLD = int(os.getenv("ANOMALY_SKIP_TX_THRESHOLD", "3000"))
-CENTRALITY_SKIP_TX_THRESHOLD = int(os.getenv("CENTRALITY_SKIP_TX_THRESHOLD", "1000"))
+CENTRALITY_SKIP_TX_THRESHOLD = int(os.getenv("CENTRALITY_SKIP_TX_THRESHOLD", "500"))
 MAX_GRAPH_NODES_RESPONSE = int(os.getenv("MAX_GRAPH_NODES_RESPONSE", "1000"))
 MAX_GRAPH_EDGES_RESPONSE = int(os.getenv("MAX_GRAPH_EDGES_RESPONSE", "1500"))
 TIME_LIMIT = 25.0 # Seconds before we start skipping optional blocks
@@ -300,7 +300,7 @@ class ProcessingService:
             logger.exception("flow_detectors failed")
 
         # 14.5 Heavy Stats (Conditional)
-        if (time.time() - t_start) < 20.0:
+        if (time.time() - t_start) < 15.0:
             if len(df) < CENTRALITY_SKIP_TX_THRESHOLD:
                 with log_timer("betweenness_centrality"):
                     try:
@@ -356,7 +356,7 @@ class ProcessingService:
 
         # 19. Closeness centrality on suspicious subgraph (HEAVY)
         closeness_accounts = set()
-        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < 22.0:
+        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < 18.0:
             suspicious_set = {
                 acct for acct, data in normalized.items() if data["score"] > 0
             }
@@ -366,7 +366,7 @@ class ProcessingService:
 
         # 20. Local clustering on suspicious subgraph (HEAVY)
         clustering_accounts = set()
-        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < 22.0:
+        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < 18.0:
             suspicious_set = {
                 acct for acct, data in normalized.items() if data["score"] > 0
             }
@@ -513,7 +513,7 @@ class ProcessingService:
                     existing.update(patterns)
                     normalized[acct_id]["patterns"] = sorted(list(existing))
 
-        if ML_ENABLED and (time.time() - t_start) < 24.0:
+        if ML_ENABLED and (time.time() - t_start) < 20.0:
             model_path = _resolve_model_path()
             try:
                 model = _get_cached_model(model_path)

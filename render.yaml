@@ -17,7 +17,7 @@ services:
       - key: ANOMALY_SKIP_TX_THRESHOLD
         value: "2500"
       - key: CENTRALITY_SKIP_TX_THRESHOLD
-        value: "1200"
+        value: "500"
       - key: MAX_GRAPH_NODES_RESPONSE
         value: 800
       - key: MAX_GRAPH_EDGES_RESPONSE
@@ -25,7 +25,7 @@ services:
     healthCheckPath: /health
     initialDelaySeconds: 60
     periodSeconds: 30
-    autoDeploy: false
+    autoDeploy: true
 
   # Frontend (React/Vite Static Site)
   - type: web
