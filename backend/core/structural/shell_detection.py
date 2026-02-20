@@ -37,16 +37,23 @@ def _identify_shell_accounts(G: nx.MultiDiGraph, df: pd.DataFrame) -> Set[str]:
 
     shell_accounts: Set[str] = set()
 
+    # Pre-calculate degrees as dicts
+    in_degrees = dict(G.in_degree())
+    out_degrees = dict(G.out_degree())
+
     for node in G.nodes():
         node_str = str(node)
         
         # Static graph check
-        total_degree = G.in_degree(node) + G.out_degree(node)
-        if total_degree > SHELL_MAX_DEGREE:
+        n_in_deg = in_degrees.get(node, 0)
+        n_out_deg = out_degrees.get(node, 0)
+        total_degree = n_in_deg + n_out_deg
+        
+        if total_degree > SHELL_MAX_DEGREE or total_degree == 0:
             continue
 
         # Must have BOTH incoming and outgoing edges (pass-through behavior)
-        if G.in_degree(node) == 0 or G.out_degree(node) == 0:
+        if n_in_deg == 0 or n_out_deg == 0:
             continue
 
         # Transaction count check
@@ -60,13 +67,12 @@ def _identify_shell_accounts(G: nx.MultiDiGraph, df: pd.DataFrame) -> Set[str]:
             continue
 
         # Holding time check
-        if n_in > 0 and n_out > 0:
-            t_in = first_in.get(node_str)
-            t_out = first_out.get(node_str)
-            if t_in and t_out:
-                holding_hours = (t_out - t_in).total_seconds() / 3600
-                if holding_hours > SHELL_HOLDING_TIME_HOURS:
-                    continue
+        t_in = first_in.get(node_str)
+        t_out = first_out.get(node_str)
+        if t_in and t_out:
+            holding_hours = (t_out - t_in).total_seconds() / 3600
+            if holding_hours > SHELL_HOLDING_TIME_HOURS:
+                continue
 
         shell_accounts.add(node_str)
 
@@ -77,11 +83,17 @@ def _find_shell_chains(
     G: nx.MultiDiGraph, shell_accounts: Set[str]
 ) -> List[List[str]]:
     """DFS to find chains ≥ SHELL_MIN_CHAIN_LENGTH where all intermediates are shell."""
+    if not shell_accounts:
+        return []
+        
     simple_G = nx.DiGraph(G)
     chains: List[List[str]] = []
     visited_chains: Set[tuple] = set()
 
-    for start_node in simple_G.nodes():
+    # Search only from nodes that are likely to be part of a chain
+    start_nodes = [node for node in simple_G.nodes() if str(node) in shell_accounts or any(str(nbr) in shell_accounts for nbr in simple_G.successors(node))]
+
+    for start_node in start_nodes:
         stack = [(start_node, [start_node])]
 
         while stack:

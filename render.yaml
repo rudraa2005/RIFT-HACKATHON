@@ -4,22 +4,22 @@ services:
     name: graphlens-backend
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: cd backend && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:10000 --timeout 120 --preload
+    startCommand: cd backend && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 1 -b 0.0.0.0:10000 --timeout 300 --preload
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.7
       - key: PYTHONPATH
         value: .
       - key: MAX_TRANSACTIONS
-        value: 3500
+        value: 2000
       - key: ANOMALY_SKIP_TX_THRESHOLD
-        value: 5000
+        value: 2500
       - key: CENTRALITY_SKIP_TX_THRESHOLD
-        value: 3200
+        value: 800
       - key: MAX_GRAPH_NODES_RESPONSE
-        value: 1200
+        value: 800
       - key: MAX_GRAPH_EDGES_RESPONSE
-        value: 2200
+        value: 1200
     autoDeploy: false
 
   # Frontend (React/Vite Static Site)

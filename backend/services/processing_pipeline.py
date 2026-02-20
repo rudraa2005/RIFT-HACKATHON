@@ -140,6 +140,16 @@ def warmup_ml_model() -> bool:
         return False
 
 
+import contextlib
+
+@contextlib.contextmanager
+def log_timer(label: str):
+    start = time.time()
+    yield
+    elapsed = time.time() - start
+    logger.info("Module [%s] took %.4f seconds", label, elapsed)
+
+
 class ProcessingService:
     """Orchestrates the complete money-muling detection pipeline."""
 
@@ -176,32 +186,32 @@ class ProcessingService:
         trigger_times: Dict[str, Dict[str, str]] = {}
 
         # 2. Cycle detection
-        t_cyc = time.time()
-        cycle_rings = detect_cycles(G, df)
-        cycle_accounts: set = set()
-        cycle_triggers: Dict[str, str] = {}
-        for ring in cycle_rings:
-            cycle_accounts.update(ring["members"])
-            for member in ring["members"]:
-                if member not in cycle_triggers:
-                    cycle_triggers[member] = str(df["timestamp"].max())
-        trigger_times["cycle"] = cycle_triggers
+        with log_timer("cycle_detection"):
+            cycle_rings = detect_cycles(G, df)
+            cycle_accounts: set = set()
+            cycle_triggers: Dict[str, str] = {}
+            for ring in cycle_rings:
+                cycle_accounts.update(ring["members"])
+                for member in ring["members"]:
+                    if member not in cycle_triggers:
+                        cycle_triggers[member] = str(df["timestamp"].max())
+            trigger_times["cycle"] = cycle_triggers
 
         # 3. Smurfing detection
-        t_smurf = time.time()
-        smurf_rings, aggregators, dispersers, smurf_triggers = detect_smurfing(
-            df,
-            min_senders_override=thresholds["smurfing_min_senders"],
-            min_receivers_override=thresholds["smurfing_min_receivers"],
-        )
-        trigger_times.update(smurf_triggers)
+        with log_timer("smurfing_detection"):
+            smurf_rings, aggregators, dispersers, smurf_triggers = detect_smurfing(
+                df,
+                min_senders_override=thresholds["smurfing_min_senders"],
+                min_receivers_override=thresholds["smurfing_min_receivers"],
+            )
+            trigger_times.update(smurf_triggers)
 
         # 4. Shell chain detection
-        t_shell = time.time()
-        shell_rings, shell_accounts = detect_shell_chains(G, df, exclude_nodes=cycle_accounts)
-        trigger_times["shell_account"] = {
-            acct: str(df["timestamp"].max()) for acct in shell_accounts
-        }
+        with log_timer("shell_chain_detection"):
+            shell_rings, shell_accounts = detect_shell_chains(G, df, exclude_nodes=cycle_accounts)
+            trigger_times["shell_account"] = {
+                acct: str(df["timestamp"].max()) for acct in shell_accounts
+            }
 
         # 5. Rapid pass-through detection
         rapid_pt_accounts, _ = detect_rapid_pass_through(df)
@@ -236,10 +246,11 @@ class ProcessingService:
 
         # 7. Betweenness centrality (HEAVY)
         centrality_accounts = set()
-        if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
-            centrality_accounts, _ = compute_centrality(G)
-        else:
-            logger.info("Skipping betweenness centrality for performance.")
+        with log_timer("betweenness_centrality"):
+            if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
+                centrality_accounts, _ = compute_centrality(G)
+            else:
+                logger.info("Skipping betweenness centrality for performance.")
 
         # 8. Net retention ratio
         retention_accounts = detect_low_retention(df)
@@ -271,13 +282,12 @@ class ProcessingService:
         merchant_accounts, payroll_accounts = detect_false_positives(df)
 
         # 14.5 Unsupervised Anomaly Detection (Isolation Forest)
-        # Keep enabled for accuracy; skip only beyond explicit high threshold.
-        t_ml = time.time()
-        if len(df) >= ANOMALY_SKIP_TX_THRESHOLD:
-            anomaly_scores = {}
-        else:
-            txn_anomaly_scores = detect_anomalies(df)
-            anomaly_scores = aggregate_anomaly_scores(df, txn_anomaly_scores)
+        with log_timer("anomaly_detection"):
+            if len(df) >= ANOMALY_SKIP_TX_THRESHOLD:
+                anomaly_scores = {}
+            else:
+                txn_anomaly_scores = detect_anomalies(df)
+                anomaly_scores = aggregate_anomaly_scores(df, txn_anomaly_scores)
 
         # 15. Compute scores (all patterns)
         t_score = time.time()
@@ -309,9 +319,9 @@ class ProcessingService:
         # 16. Use raw scores for propagation (Removed normalize_scores to prevent clamping)
         normalized = raw_scores 
 
-        # 17. Risk propagation (graph-based) — mutates normalized in-place
-        t_prop = time.time()
-        normalized = propagate_risk(G, normalized)
+        # 17. Risk propagation (graph-based)
+        with log_timer("risk_propagation"):
+            normalized = propagate_risk(G, normalized)
 
         # 18. Build neighbor map for connectivity analysis
         neighbor_map = build_neighbor_map(df)
