@@ -7,13 +7,10 @@ Extracted from app/main.py for cleaner separation.
 import io
 import time
 
-import pandas as pd
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
-
 from utils.history_store import HistoryStore
 from utils.metrics import MetricsTracker
-from utils.validators import validate_csv
 
 router = APIRouter()
 metrics_tracker = MetricsTracker()
@@ -58,6 +55,7 @@ async def upload_csv(file: UploadFile = File(...)):
 
     try:
         contents = await file.read()
+        import pandas as pd
         df = pd.read_csv(
             io.BytesIO(contents),
             parse_dates=["timestamp"],
@@ -65,6 +63,7 @@ async def upload_csv(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
 
+    from utils.validators import validate_csv
     validation_error = validate_csv(df)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)

@@ -19,7 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from api.routes import router
-from services.processing_pipeline import warmup_ml_model
 
 logger = logging.getLogger(__name__)
 

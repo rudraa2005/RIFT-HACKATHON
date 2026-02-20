@@ -53,7 +53,7 @@ DETECTOR_WORKERS = max(2, min(int(os.getenv("DETECTOR_WORKERS", str(os.cpu_count
 
 _MODEL_CACHE_LOCK = threading.Lock()
 _CACHED_MODEL_PATH: str | None = None
-_CACHED_MODEL: RiskModel | None = None
+_CACHED_MODEL: Any | None = None
 
 
 def _resolve_model_path() -> str:
@@ -107,7 +107,7 @@ def warmup_ml_model() -> bool:
 class ProcessingService:
     """Orchestrates the complete money-muling detection pipeline."""
 
-    def process(self, df: pd.DataFrame) -> Dict[str, Any]:
+    def process(self, df: Any) -> Dict[str, Any]:
         import networkx as nx
         import numpy as np
         import pandas as pd

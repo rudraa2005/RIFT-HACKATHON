@@ -8,6 +8,7 @@ Memory: O(1) additional beyond the DataFrame
 """
 
 import pandas as pd
+from typing import Any
 
 REQUIRED_COLUMNS = [
     "transaction_id",
@@ -18,7 +19,8 @@ REQUIRED_COLUMNS = [
 ]
 
 
-def validate_csv(df: pd.DataFrame) -> str | None:
+def validate_csv(df: Any) -> str | None:
+    import pandas as pd
     """
     Validate CSV structure. Returns error message if invalid, None if valid.
 
