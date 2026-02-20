@@ -46,5 +46,6 @@ app.include_router(router)
 
 @app.on_event("startup")
 async def _startup_warmup():
-    ml_ready = warmup_ml_model()
-    logger.info("Startup warmup complete. ml_model_ready=%s", ml_ready)
+    # ml_ready = warmup_ml_model() 
+    # logger.info("Startup warmup complete. ml_model_ready=%s", ml_ready)
+    logger.info("App starting up. ML warmup deferred to first request for faster port binding.")

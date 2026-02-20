@@ -4,7 +4,7 @@ services:
     name: graphlens-backend
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: cd backend && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 1 -b 0.0.0.0:10000 --timeout 300 --preload
+    startCommand: cd backend && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 1 -b 0.0.0.0:$PORT --timeout 600
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.7
