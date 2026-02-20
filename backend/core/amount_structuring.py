@@ -39,7 +39,8 @@ def detect_amount_structuring(df: pd.DataFrame) -> Set[str]:
     Time Complexity: O(V × T)
     """
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     flagged: Set[str] = set()
     window_delta = timedelta(hours=STRUCTURING_WINDOW_HOURS)
@@ -74,3 +75,5 @@ def detect_amount_structuring(df: pd.DataFrame) -> Set[str]:
                 break  # One match is enough
 
     return flagged
+
+

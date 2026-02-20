@@ -27,7 +27,8 @@ def detect_rapid_pass_through(
     Vectorized detection of rapid pass-through behavior (O(N log N)).
     """
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     df = df.sort_values("timestamp")
 
     flagged: Set[str] = set()
@@ -77,3 +78,5 @@ def detect_rapid_pass_through(
                 }
 
     return flagged, details
+
+

@@ -37,7 +37,8 @@ def detect_rapid_forwarding(
     Time Complexity: O(V × T)
     """
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     flagged: Set[str] = set()
     details: Dict[str, Dict[str, Any]] = {}
@@ -77,3 +78,5 @@ def detect_rapid_forwarding(
             }
 
     return flagged, details
+
+

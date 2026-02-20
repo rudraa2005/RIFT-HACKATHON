@@ -19,7 +19,8 @@ def detect_burst_diversity(df: pd.DataFrame) -> Tuple[Set[str], Dict[str, str]]:
         Tuple of (flagged_set, trigger_times)
     """
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     flagged: Set[str] = set()
     trigger_times: Dict[str, str] = {}
 
@@ -46,3 +47,5 @@ def detect_burst_diversity(df: pd.DataFrame) -> Tuple[Set[str], Dict[str, str]]:
             trigger_times[account_id] = str(incoming["timestamp"].max())
 
     return flagged, trigger_times
+
+

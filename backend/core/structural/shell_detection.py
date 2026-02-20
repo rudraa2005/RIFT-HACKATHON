@@ -23,7 +23,8 @@ from app.config import (
 def _identify_shell_accounts(G: nx.MultiDiGraph, df: pd.DataFrame) -> Set[str]:
     """Identify shell accounts using vectorized grouping for O(N) speed."""
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     
     # Pre-calculate node-level stats
     # 1. Transaction counts
@@ -172,3 +173,5 @@ def detect_shell_chains(
         )
 
     return rings, total_shell_members
+
+

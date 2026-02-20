@@ -28,7 +28,8 @@ def detect_cascade_depth(G: nx.MultiDiGraph, df: pd.DataFrame) -> tuple[list[dic
         (rings_list, flagged_account_ids_set)
     """
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     window_delta = timedelta(hours=CASCADE_WINDOW_HOURS)
 
     flagged: Set[str] = set()
@@ -94,3 +95,5 @@ def detect_cascade_depth(G: nx.MultiDiGraph, df: pd.DataFrame) -> tuple[list[dic
                 break
 
     return rings, flagged
+
+

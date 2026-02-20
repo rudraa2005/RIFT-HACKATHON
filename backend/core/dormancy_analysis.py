@@ -31,7 +31,8 @@ def detect_dormant_activation(df: pd.DataFrame) -> Set[str]:
         return set()
         
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     dataset_start = df["timestamp"].min()
 
     flagged: Set[str] = set()
@@ -82,3 +83,5 @@ def detect_dormant_activation(df: pd.DataFrame) -> Set[str]:
                     break
 
     return flagged
+
+

@@ -28,7 +28,8 @@ def detect_smurfing(
         (rings_list, aggregator_set, disperser_set, trigger_times)
     """
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     df = df.sort_values("timestamp")
 
     fan_in_rings, aggregators, in_triggers = detect_fan_in(df, min_senders_override)
@@ -42,3 +43,5 @@ def detect_smurfing(
     }
 
     return fan_in_rings + fan_out_rings, aggregators, dispersers, trigger_times
+
+

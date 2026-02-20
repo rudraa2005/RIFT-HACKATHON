@@ -29,7 +29,8 @@ def compute_high_velocity_accounts(
     Time Complexity: O(V)
     """
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     multiplier = multiplier_override or HIGH_VELOCITY_THRESHOLD
     all_accounts = set(df["sender_id"].unique()) | set(df["receiver_id"].unique())
@@ -61,3 +62,5 @@ def compute_high_velocity_accounts(
     trigger_ts = {a: last_tx_ts[a] for a in high_v_ids}
 
     return high_v_ids, trigger_ts
+
+

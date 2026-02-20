@@ -35,6 +35,7 @@ Memory: O(V + E) for graph + O(R) for rings.
 import logging
 import os
 import time
+import threading
 from typing import Any, Dict, Set
 
 import networkx as nx
@@ -80,8 +81,40 @@ from app.config import ML_ENABLED, ML_MODEL_PATH
 
 logger = logging.getLogger(__name__)
 
-# Maximum transactions to process (performance requirement: ≤ 30s)
+# Maximum transactions to process (performance requirement: <= 30s)
 MAX_TRANSACTIONS = 5_000
+
+_MODEL_CACHE_LOCK = threading.Lock()
+_CACHED_MODEL_PATH: str | None = None
+_CACHED_MODEL: RiskModel | None = None
+
+
+def _resolve_model_path() -> str:
+    model_path = ML_MODEL_PATH
+    if not os.path.isabs(model_path):
+        backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        model_path = os.path.join(backend_root, model_path)
+    return model_path
+
+
+def _get_cached_model(model_path: str) -> RiskModel | None:
+    global _CACHED_MODEL, _CACHED_MODEL_PATH
+
+    with _MODEL_CACHE_LOCK:
+        if _CACHED_MODEL is not None and _CACHED_MODEL_PATH == model_path:
+            return _CACHED_MODEL
+
+        if not os.path.exists(model_path):
+            return None
+
+        model = RiskModel()
+        model.load(model_path)
+        if not model.is_trained:
+            return None
+
+        _CACHED_MODEL = model
+        _CACHED_MODEL_PATH = model_path
+        return _CACHED_MODEL
 
 
 class ProcessingService:
@@ -397,66 +430,58 @@ class ProcessingService:
                     existing.update(patterns)
                     normalized[acct_id]["patterns"] = sorted(list(existing))
 
-        # 22. ML feature vector construction
-        all_accounts = set(df["sender_id"].unique()) | set(
-            df["receiver_id"].unique()
-        )
-        feature_vectors, account_list = build_feature_vectors(
-            all_accounts=all_accounts,
-            cycle_accounts=cycle_accounts,
-            aggregators=aggregators,
-            dispersers=dispersers,
-            shell_accounts=shell_accounts,
-            high_velocity=high_velocity,
-            rapid_pass_through=rapid_pt_accounts,
-            activity_spike=spike_accounts,
-            high_centrality=centrality_accounts,
-            low_retention=retention_accounts,
-            high_throughput=throughput_accounts,
-            balance_oscillation=oscillation_accounts,
-            burst_diversity=diversity_accounts,
-            scc_members=scc_accounts,
-            cascade_depth=cascade_accounts,
-            irregular_activity=irregular_accounts,
-            high_closeness=closeness_accounts,
-            high_clustering=clustering_accounts,
-            rapid_forwarding=forwarding_accounts,
-            dormant_activation=dormant_accounts,
-            structured_fragmentation=structuring_accounts,
-            G=G,
-            df=df,
-        )
-
         # 23. ML inference + hybrid scoring
         ml_scores = None
+        model = None
         if ML_ENABLED:
-            # Resolve model path relative to backend root
-            model_path = ML_MODEL_PATH
-            if not os.path.isabs(model_path):
-                backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                model_path = os.path.join(backend_root, model_path)
-            
-            if os.path.exists(model_path):
-                try:
-                    model = RiskModel()
-                    model.load(model_path)
-                    if model.is_trained:
-                        X = vectors_to_matrix(feature_vectors, account_list)
-                        probs = model.predict(X)
-                        ml_scores = {
-                            acct: float(prob)
-                            for acct, prob in zip(account_list, probs)
-                        }
-                        logger.info("ML scoring completed for %d accounts", len(ml_scores))
-                    else:
-                        logger.warning("ML model loaded but not trained; using rule-only scoring")
-                except Exception as e:
-                    logger.warning(
-                        "ML scoring unavailable, falling back to rule-only: %s", e
-                    )
-                    ml_scores = None
-            else:
-                logger.warning("ML model file not found at %s; using rule-only scoring", model_path)
+            model_path = _resolve_model_path()
+            try:
+                model = _get_cached_model(model_path)
+                if model is None:
+                    logger.warning("ML model unavailable at %s; using rule-only scoring", model_path)
+            except Exception as e:
+                logger.warning(
+                    "ML scoring unavailable, falling back to rule-only: %s", e
+                )
+                model = None
+
+        # 22. ML feature vector construction (only when model is available)
+        if model is not None:
+            all_accounts = set(df["sender_id"].unique()) | set(
+                df["receiver_id"].unique()
+            )
+            feature_vectors, account_list = build_feature_vectors(
+                all_accounts=all_accounts,
+                cycle_accounts=cycle_accounts,
+                aggregators=aggregators,
+                dispersers=dispersers,
+                shell_accounts=shell_accounts,
+                high_velocity=high_velocity,
+                rapid_pass_through=rapid_pt_accounts,
+                activity_spike=spike_accounts,
+                high_centrality=centrality_accounts,
+                low_retention=retention_accounts,
+                high_throughput=throughput_accounts,
+                balance_oscillation=oscillation_accounts,
+                burst_diversity=diversity_accounts,
+                scc_members=scc_accounts,
+                cascade_depth=cascade_accounts,
+                irregular_activity=irregular_accounts,
+                high_closeness=closeness_accounts,
+                high_clustering=clustering_accounts,
+                rapid_forwarding=forwarding_accounts,
+                dormant_activation=dormant_accounts,
+                structured_fragmentation=structuring_accounts,
+                G=G,
+                df=df,
+            )
+            X = vectors_to_matrix(feature_vectors, account_list)
+            probs = model.predict(X)
+            ml_scores = {
+                acct: float(prob)
+                for acct, prob in zip(account_list, probs)
+            }
+            logger.info("ML scoring completed for %d accounts", len(ml_scores))
 
         normalized = compute_hybrid_scores(normalized, ml_scores)
 
@@ -678,9 +703,12 @@ class ProcessingService:
             rule_avg = 0.0
             ml_avg = 0.0
             total_avg = 0.0
+        ml_available = bool(ml_scores)
         res["summary"]["rule_based_accuracy"] = round(rule_avg, 2)
         res["summary"]["ml_model_accuracy"] = round(ml_avg, 2)
         res["summary"]["total_accuracy"] = round(total_avg, 2)
+        res["summary"]["ml_model_available"] = ml_available
         # ENFORCE STRICT SCHEMA COMPLIANCE (Remove extra fields)
         res["summary"]["processing_time_seconds"] = round(time.time() - t_start, 4)
         return res
+

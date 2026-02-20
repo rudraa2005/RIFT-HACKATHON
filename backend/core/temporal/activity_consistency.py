@@ -30,7 +30,8 @@ def detect_irregular_activity(df: pd.DataFrame) -> Set[str]:
     Time Complexity: O(V × T)
     """
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     flagged: Set[str] = set()
 
     all_accounts = set(df["sender_id"].unique()) | set(df["receiver_id"].unique())
@@ -75,3 +76,5 @@ def detect_irregular_activity(df: pd.DataFrame) -> Set[str]:
             flagged.add(str(account))
 
     return flagged
+
+

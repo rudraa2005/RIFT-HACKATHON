@@ -36,7 +36,8 @@ def detect_activity_spikes(
         Tuple of (flagged_set, trigger_timestamps)
     """
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     flagged: Set[str] = set()
     trigger_times: Dict[str, str] = {}
@@ -91,3 +92,5 @@ def detect_activity_spikes(
             trigger_times[account_id] = str(peak_timestamp)
 
     return flagged, trigger_times
+
+

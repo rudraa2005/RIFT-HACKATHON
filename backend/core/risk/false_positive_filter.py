@@ -23,7 +23,8 @@ from app.config import (
 def detect_merchants(df: pd.DataFrame) -> Set[str]:
     """Flag receiver accounts that look like merchants (legitimate businesses)."""
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     merchants: Set[str] = set()
 
     for account in df["receiver_id"].unique():
@@ -59,7 +60,8 @@ def detect_merchants(df: pd.DataFrame) -> Set[str]:
 def detect_payroll(df: pd.DataFrame) -> Set[str]:
     """Flag sender accounts that look like payroll disbursers AND recipients."""
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
     payroll: Set[str] = set()
 
     # Detect payroll senders (companies paying employees)
@@ -99,3 +101,5 @@ def detect_false_positives(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
         (merchant_accounts, payroll_accounts)
     """
     return detect_merchants(df), detect_payroll(df)
+
+

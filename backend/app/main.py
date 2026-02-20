@@ -15,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from api.routes import router
 
@@ -32,5 +33,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Compress large JSON responses (graph payloads/history) to reduce network latency.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.include_router(router)
