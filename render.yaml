@@ -23,8 +23,6 @@ services:
       - key: MAX_GRAPH_EDGES_RESPONSE
         value: 1200
     healthCheckPath: /health
-    initialDelaySeconds: 60
-    periodSeconds: 30
     autoDeploy: true
 
   # Frontend (React/Vite Static Site)
