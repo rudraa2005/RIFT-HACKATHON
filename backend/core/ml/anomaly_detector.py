@@ -41,7 +41,7 @@ def detect_anomalies(df: pd.DataFrame) -> pd.Series:
     # 2. Model Training
     # contamination='auto' lets the model decide the outlier fraction
     # n_estimators=100 is usually enough for 10k rows
-    model = IsolationForest(n_estimators=100, contamination=0.01, random_state=42, n_jobs=-1)
+    model = IsolationForest(n_estimators=40, contamination=0.01, random_state=42, n_jobs=-1)
     
     # Fit and Predict
     # Isolation Forest returns -1 for outliers and 1 for inliers

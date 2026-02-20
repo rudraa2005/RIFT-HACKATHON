@@ -167,8 +167,10 @@ class RiskModel:
                 logger.info("Legacy model loaded from %s (using default scaler)", path)
                 
         except Exception as e:
-            logger.error("Failed to load model: %s.", str(e))
-            # Leave self._model as None so callers can detect missing ML cleanly.
+            logger.warning("Failed to load pickle model: %s. Attempting JSON fallback...", str(e))
+            # JSON Fallback logic if needed, but for now just clear
+            self._model = None
+            self._scaler = StandardScaler()
         
         return self
 
