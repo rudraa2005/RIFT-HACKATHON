@@ -3,6 +3,25 @@ import { useSearchParams, Link, useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import { useAnalysis } from '../context/AnalysisContext'
 
+function inferCurrencyPrefix(analysis) {
+  const symbol =
+    analysis?.summary?.currency_symbol ||
+    analysis?.currency_symbol ||
+    analysis?.meta?.currency_symbol ||
+    ''
+
+  if (!symbol || symbol.includes('?') || /[^\x00-\x7F]/.test(symbol)) {
+    return 'INR '
+  }
+  return symbol
+}
+
+function formatAmount(value, prefix) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return String(value || 'N/A')
+  return `${prefix}${num.toLocaleString()}`
+}
+
 function buildGraphData(analysis, highlightRing, accountFocus) {
   // When analysis is available, derive ring-aware graph data.
   if (analysis?.graph_data?.nodes?.length && analysis.graph_data.edges?.length) {
@@ -108,6 +127,8 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
       allowedAccounts = new Set(ranked.slice(0, 70))
     }
 
+    const currencyPrefix = inferCurrencyPrefix(analysis)
+
     // Build one representative transaction per account so node tooltips/panels
     // always have consistent transaction metadata.
     const txByAccount = new Map()
@@ -118,7 +139,7 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
 
       const tx = {
         transaction_id: edge.transaction_id || 'N/A',
-        amount: typeof edge.amount === 'number' ? `$${edge.amount.toLocaleString()}` : String(edge.amount || 'N/A'),
+        amount: formatAmount(edge.amount, currencyPrefix),
         timestamp: edge.timestamp || 'N/A',
         ts: Number.isFinite(new Date(edge.timestamp).getTime()) ? new Date(edge.timestamp).getTime() : -1,
       }
@@ -194,12 +215,12 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
       // Backfill from edge if tx metadata is still missing.
       if ((!to.txnId || to.txnId === 'N/A') && edge.transaction_id) {
         to.txnId = edge.transaction_id
-        to.amount = typeof edge.amount === 'number' ? `$${edge.amount.toLocaleString()}` : String(edge.amount || 'N/A')
+        to.amount = formatAmount(edge.amount, currencyPrefix)
         to.timestamp = edge.timestamp || 'N/A'
       }
       if ((!from.txnId || from.txnId === 'N/A') && edge.transaction_id) {
         from.txnId = edge.transaction_id
-        from.amount = typeof edge.amount === 'number' ? `$${edge.amount.toLocaleString()}` : String(edge.amount || 'N/A')
+        from.amount = formatAmount(edge.amount, currencyPrefix)
         from.timestamp = edge.timestamp || 'N/A'
       }
     })
@@ -253,9 +274,9 @@ function buildGraphData(analysis, highlightRing, accountFocus) {
 
   // Minimal fallback demo graph when no analysis is available yet
   const demoNodes = [
-    { globalId: 'A', label: 'ACCT-A', role: 'Monitored', r: 6, color: '#444', ringId: null, accId: 'ACCT-A', txnId: 'DEMO-1', amount: '$1,200', timestamp: 'Demo' },
-    { globalId: 'B', label: 'ACCT-B', role: 'Suspicious', r: 8, color: '#e5e5e5', ringId: null, accId: 'ACCT-B', txnId: 'DEMO-2', amount: '$8,400', timestamp: 'Demo' },
-    { globalId: 'C', label: 'ACCT-C', role: 'Monitored', r: 5, color: '#444', ringId: null, accId: 'ACCT-C', txnId: 'DEMO-3', amount: '$600', timestamp: 'Demo' },
+    { globalId: 'A', label: 'ACCT-A', role: 'Monitored', r: 6, color: '#444', ringId: null, accId: 'ACCT-A', txnId: 'DEMO-1', amount: 'INR 1,200', timestamp: 'Demo' },
+    { globalId: 'B', label: 'ACCT-B', role: 'Suspicious', r: 8, color: '#e5e5e5', ringId: null, accId: 'ACCT-B', txnId: 'DEMO-2', amount: 'INR 8,400', timestamp: 'Demo' },
+    { globalId: 'C', label: 'ACCT-C', role: 'Monitored', r: 5, color: '#444', ringId: null, accId: 'ACCT-C', txnId: 'DEMO-3', amount: 'INR 600', timestamp: 'Demo' },
   ]
   const demoEdges = [
     { from: 'A', to: 'B', suspicious: true, ringId: null },
