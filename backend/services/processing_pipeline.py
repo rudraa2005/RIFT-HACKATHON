@@ -626,7 +626,6 @@ class ProcessingService:
         conn_metrics["largest_component_size"] = max(len(c) for c in wcc_list) if wcc_list else 0
         
         # New: Compute SCC distribution and Depth distribution for Analytics
-        import numpy as np
         scc_sizes = sorted([len(c) for c in wcc_list], reverse=True)[:20]
         # Pad with zeros if less than 20
         if len(scc_sizes) < 20:
