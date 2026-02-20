@@ -36,48 +36,8 @@ import logging
 import os
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Set
 
-import networkx as nx
-import pandas as pd
-import numpy as np
-from scipy.stats import rankdata
-
-from core.graph.graph_builder import build_graph
-from core.structural.cycle_detection import detect_cycles
-from core.ring_detection.smurfing import detect_smurfing
-from core.structural.shell_detection import detect_shell_chains
-from core.temporal.forwarding_latency import detect_rapid_pass_through
-from core.temporal.burst_detection import detect_activity_spikes
-from core.centrality.betweenness import compute_centrality
-from core.flow.retention_analysis import detect_low_retention
-from core.flow.throughput_analysis import detect_high_throughput
-from core.flow.balance_oscillation import detect_balance_oscillation
-from core.ring_detection.diversity_analysis import detect_burst_diversity
-from core.structural.scc_analysis import detect_scc
-from core.structural.cascade_depth import detect_cascade_depth
-from core.temporal.activity_consistency import detect_irregular_activity
-from core.risk.false_positive_filter import detect_false_positives
-from core.risk.adaptive_thresholds import compute_adaptive_thresholds
-from core.risk.base_scoring import compute_scores
-from core.risk.normalization import normalize_scores
-from core.risk.risk_propagation import propagate_risk
-from core.risk.network_analysis import (
-    build_neighbor_map,
-    compute_component_concentration,
-)
-from core.forwarding_latency import detect_rapid_forwarding
-from core.dormancy_analysis import detect_dormant_activation
-from core.amount_structuring import detect_amount_structuring
-from core.centrality.closeness import compute_closeness_centrality
-from core.structural.clustering_analysis import detect_high_clustering
-from core.risk.ring_risk import finalize_ring_risks
-from core.output.json_formatter import format_output
-from core.ml.feature_vector_builder import build_feature_vectors, vectors_to_matrix
-from core.ml.ml_model import RiskModel
-from core.ml.hybrid_scorer import compute_hybrid_scores
-from core.ml.anomaly_detector import detect_anomalies, aggregate_anomaly_scores
 from app.config import ML_ENABLED, ML_MODEL_PATH
 
 logger = logging.getLogger(__name__)
@@ -104,8 +64,9 @@ def _resolve_model_path() -> str:
     return model_path
 
 
-def _get_cached_model(model_path: str) -> RiskModel | None:
+def _get_cached_model(model_path: str) -> Any | None:
     global _CACHED_MODEL, _CACHED_MODEL_PATH
+    from core.ml.ml_model import RiskModel
 
     with _MODEL_CACHE_LOCK:
         if _CACHED_MODEL is not None and _CACHED_MODEL_PATH == model_path:
@@ -124,8 +85,9 @@ def _get_cached_model(model_path: str) -> RiskModel | None:
         return _CACHED_MODEL
 
 
-def _cache_runtime_model(model: RiskModel) -> None:
+def _cache_runtime_model(model: Any) -> None:
     global _CACHED_MODEL, _CACHED_MODEL_PATH
+    from core.ml.ml_model import RiskModel
     with _MODEL_CACHE_LOCK:
         _CACHED_MODEL = model
         _CACHED_MODEL_PATH = "__runtime_trained__"
@@ -146,13 +108,45 @@ class ProcessingService:
     """Orchestrates the complete money-muling detection pipeline."""
 
     def process(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Run the full pipeline on validated transaction data.
+        import networkx as nx
+        import numpy as np
+        import pandas as pd
+        from scipy.stats import rankdata
+        from core.graph.graph_builder import build_graph
+        from core.structural.cycle_detection import detect_cycles
+        from core.ring_detection.smurfing import detect_smurfing
+        from core.structural.shell_detection import detect_shell_chains
+        from core.temporal.forwarding_latency import detect_rapid_pass_through
+        from core.temporal.burst_detection import detect_activity_spikes
+        from core.centrality.betweenness import compute_centrality
+        from core.flow.retention_analysis import detect_low_retention
+        from core.flow.throughput_analysis import detect_high_throughput
+        from core.flow.balance_oscillation import detect_balance_oscillation
+        from core.ring_detection.diversity_analysis import detect_burst_diversity
+        from core.structural.scc_analysis import detect_scc
+        from core.structural.cascade_depth import detect_cascade_depth
+        from core.temporal.activity_consistency import detect_irregular_activity
+        from core.risk.false_positive_filter import detect_false_positives
+        from core.risk.adaptive_thresholds import compute_adaptive_thresholds
+        from core.risk.base_scoring import compute_scores
+        from core.risk.network_analysis import build_neighbor_map, propagate_risk
+        from core.forwarding_latency import detect_rapid_forwarding
+        from core.dormancy_analysis import detect_dormant_activation
+        from core.amount_structuring import detect_amount_structuring
+        from core.centrality.closeness import compute_closeness_centrality
+        from core.structural.clustering_analysis import detect_high_clustering
+        from core.output.json_formatter import format_output
+        from core.ml.feature_vector_builder import build_feature_vectors, vectors_to_matrix
+        from core.ml.ml_model import RiskModel
+        from core.ml.hybrid_scorer import compute_hybrid_scores
+        from core.ml.anomaly_detector import detect_anomalies, aggregate_anomaly_scores
 
-        Returns:
-            JSON-compatible dict with suspicious_accounts, fraud_rings,
-            summary, and graph_data.
-        """
+        def log_timer(name):
+            class Timer:
+                def __enter__(self): self.t0 = time.time(); return self
+                def __exit__(self, *a): logger.info(f"Module '{name}' took {time.time()-self.t0:.3f}s")
+            return Timer()
+
         df = df.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         stage_timings: Dict[str, float] = {}
@@ -183,6 +177,7 @@ class ProcessingService:
         
         cycle_rings = []
         cycle_accounts = set()
+        high_velocity = set()
         smurf_rings = []
         aggregators = set()
         dispersers = set()

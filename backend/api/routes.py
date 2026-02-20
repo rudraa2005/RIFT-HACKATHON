@@ -11,7 +11,6 @@ import pandas as pd
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
-from services.processing_pipeline import ProcessingService
 from utils.history_store import HistoryStore
 from utils.metrics import MetricsTracker
 from utils.validators import validate_csv
@@ -71,6 +70,7 @@ async def upload_csv(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=validation_error)
 
     start_time = time.time()
+    from services.processing_pipeline import ProcessingService
     service = ProcessingService()
     result = service.process(df)
     processing_time = round(time.time() - start_time, 2)
