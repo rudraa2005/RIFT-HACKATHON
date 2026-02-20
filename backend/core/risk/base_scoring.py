@@ -223,10 +223,19 @@ def compute_scores(
             if p not in {"multi_pattern", "nonlinear_amplifier", "merchant_like", "payroll_like"}
         )
         # Behavioural smoothing
+        # If the account only has one pattern, we check if it's a high-confidence motif.
+        # High-confidence motifs (Cycle, Smurfing Aggregator, Shell) shouldn't be penalized
+        # as much as weaker signals like 'centrality' or 'cascade'.
+        high_confidence_motifs = {"cycle", "smurfing_aggregator", "shell_account", "rapid_pass_through"}
+        has_high_confidence = bool(set(patterns) & high_confidence_motifs)
+
         if core_pattern_count == 1:
-            score *= 0.5  # Heavy penalize single pattern to prevent clusters at 100
+            if not has_high_confidence:
+                score *= 0.5  # Heavy penalize single weak pattern
+            else:
+                score *= 0.9  # Mild smoothing for single strong pattern
         elif core_pattern_count >= 3:
-            score *= 1.1
+            score *= 1.2  # Stronger amplification for multiple signals
 
         score = max(0.0, score)
 

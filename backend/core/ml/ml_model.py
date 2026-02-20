@@ -167,10 +167,21 @@ class RiskModel:
                 logger.info("Legacy model loaded from %s (using default scaler)", path)
                 
         except Exception as e:
-            logger.warning("Failed to load pickle model: %s. Attempting JSON fallback...", str(e))
-            # JSON Fallback logic if needed, but for now just clear
-            self._model = None
-            self._scaler = StandardScaler()
+            logger.warning("Failed to load pickle model: %s. Trying XGBoost JSON fallback...", str(e))
+            json_path = path.replace(".pkl", ".json")
+            if os.path.exists(json_path):
+                try:
+                    import xgboost as xgb
+                    self._model = xgb.XGBClassifier()
+                    self._model.load_model(json_path)
+                    self._scaler = StandardScaler() # XGBoost JSON doesn't store scaler, using identity fallback
+                    logger.info("XGBoost JSON model loaded from %s", json_path)
+                except Exception as ex:
+                    logger.error("XGBoost JSON fallback failed: %s", str(ex))
+                    self._model = None
+            else:
+                self._model = None
+                self._scaler = StandardScaler()
         
         return self
 
