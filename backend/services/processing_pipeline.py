@@ -129,7 +129,10 @@ class ProcessingService:
         from core.risk.false_positive_filter import detect_false_positives
         from core.risk.adaptive_thresholds import compute_adaptive_thresholds
         from core.risk.base_scoring import compute_scores
-        from core.risk.network_analysis import build_neighbor_map, propagate_risk
+        from core.risk.normalization import normalize_scores
+        from core.risk.risk_propagation import propagate_risk
+        from core.risk.ring_risk import finalize_ring_risks
+        from core.risk.network_analysis import build_neighbor_map, compute_component_concentration
         from core.forwarding_latency import detect_rapid_forwarding
         from core.dormancy_analysis import detect_dormant_activation
         from core.amount_structuring import detect_amount_structuring
