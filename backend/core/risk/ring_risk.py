@@ -96,10 +96,48 @@ def finalize_ring_risks(
     high_velocity: Set[str],
 ) -> list:
     """Apply density computation and enhanced risk scoring to all rings."""
+    simple_G = nx.DiGraph(G)
+    degree_map = dict(simple_G.degree())
     for ring in all_rings:
-        density = compute_ring_density(G, ring)
+        members = [str(m) for m in ring.get("members", [])]
+        ring["members"] = members
+        n = len(members)
+        if n < 2:
+            density = 0.0
+            avg_sub_degree = 0.0
+        else:
+            max_edges = n * (n - 1)
+            subgraph = simple_G.subgraph(members)
+            actual_edges = subgraph.number_of_edges()
+            density = round(actual_edges / max_edges, 2) if max_edges > 0 else 0.0
+            avg_sub_degree = sum(degree_map.get(m, 0.0) for m in members) / n
+
         ring["density_score"] = density
-        ring["risk_score"] = enhance_ring_risk(ring, density, scores, high_velocity, G)
+
+        base_structural = float(ring.get("risk_score", 50))
+        velocity_count = sum(1 for m in members if m in high_velocity)
+        velocity_score = (velocity_count / n) * 100 if n else 0.0
+
+        retention_count = 0
+        for m in members:
+            patterns = scores.get(m, {}).get("patterns", [])
+            if any(p in patterns for p in ["low_retention_pass_through", "rapid_pass_through", "flow_chain_member"]):
+                retention_count += 1
+        retention_score = (retention_count / n) * 100 if n else 0.0
+        density_score = density * 100
+        centrality_score = min(100, avg_sub_degree * 20)
+        jitter = (hash(frozenset(members)) % 100) / 2000.0
+
+        risk = (
+            (base_structural * 0.45) +
+            (velocity_score * 0.15) +
+            (retention_score * 0.15) +
+            (density_score * 0.15) +
+            (centrality_score * 0.1) +
+            jitter
+        )
+        ring["risk_score"] = float(min(100, risk))
+        ring["density_score"] = density
         if density > RING_DENSITY_THRESHOLD:
             ring["risk_score"] = round(
                 min(100, ring["risk_score"] * (1 + RING_DENSITY_BONUS_PERCENT / 100)),

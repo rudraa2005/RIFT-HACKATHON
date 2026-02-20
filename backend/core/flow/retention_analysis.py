@@ -27,23 +27,19 @@ def detect_low_retention(df: pd.DataFrame) -> Set[str]:
     Time Complexity: O(V)
     """
     df = df.copy()
-    flagged: Set[str] = set()
 
-    all_accounts = set(df["sender_id"].unique()) | set(df["receiver_id"].unique())
+    inflow = df.groupby("receiver_id", observed=True)["amount"].sum()
+    outflow = df.groupby("sender_id", observed=True)["amount"].sum()
+    all_accounts = inflow.index.union(outflow.index)
 
-    for account in all_accounts:
-        total_inflow = df[df["receiver_id"] == account]["amount"].sum()
-        total_outflow = df[df["sender_id"] == account]["amount"].sum()
+    inflow_all = inflow.reindex(all_accounts, fill_value=0.0).astype(float)
+    outflow_all = outflow.reindex(all_accounts, fill_value=0.0).astype(float)
 
-        if total_inflow == 0:
-            continue
+    valid = inflow_all > 0
+    if not valid.any():
+        return set()
 
-        retention = (total_inflow - total_outflow) / total_inflow
-
-        # Clamp to valid bounds
-        retention = max(-1.0, min(1.0, retention))
-
-        if RETENTION_LOW <= retention <= RETENTION_HIGH:
-            flagged.add(str(account))
-
-    return flagged
+    retention = (inflow_all[valid] - outflow_all[valid]) / inflow_all[valid]
+    retention = retention.clip(lower=-1.0, upper=1.0)
+    flagged_idx = retention[(retention >= RETENTION_LOW) & (retention <= RETENTION_HIGH)].index
+    return {str(account) for account in flagged_idx}

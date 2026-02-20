@@ -56,11 +56,11 @@ def compute_hybrid_scores(
 
     for account, data in normalized_scores.items():
         # Normalize rule score from [0, 100] → [0, 1]
-        rule_normalized = round(data["score"] / 100.0, 4)
+        rule_normalized = max(0.0, min(1.0, round(data["score"] / 100.0, 4)))
         data["rule_risk_score"] = rule_normalized
 
         if use_ml and account in ml_scores:
-            ml_score = float(ml_scores[account])
+            ml_score = max(0.0, min(1.0, float(ml_scores[account])))
             data["ml_risk_score"] = float(round(ml_score, 4))
             
             # Non-Linear Blending: Consensus Multiplier

@@ -27,37 +27,36 @@ def detect_balance_oscillation(df: pd.DataFrame) -> Set[str]:
     df = df.copy()
     if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
         df["timestamp"] = pd.to_datetime(df["timestamp"])
-    flagged: Set[str] = set()
+    inflows = df[["receiver_id", "timestamp", "amount"]].rename(
+        columns={"receiver_id": "account_id"}
+    )
+    inflows["net"] = inflows["amount"].astype(float)
 
-    all_accounts = set(df["sender_id"].unique()) | set(df["receiver_id"].unique())
+    outflows = df[["sender_id", "timestamp", "amount"]].rename(
+        columns={"sender_id": "account_id"}
+    )
+    outflows["net"] = -outflows["amount"].astype(float)
 
-    for account in all_accounts:
-        # Build time-ordered net flow events
-        inflows = df[df["receiver_id"] == account][["timestamp", "amount"]].copy()
-        inflows["net"] = inflows["amount"]
-        outflows = df[df["sender_id"] == account][["timestamp", "amount"]].copy()
-        outflows["net"] = -outflows["amount"]
+    events = pd.concat([inflows[["account_id", "timestamp", "net"]], outflows[["account_id", "timestamp", "net"]]], ignore_index=True)
+    if events.empty:
+        return set()
 
-        events = pd.concat([inflows[["timestamp", "net"]], outflows[["timestamp", "net"]]])
-        if len(events) < 4:
-            continue
+    events = events.sort_values(["account_id", "timestamp"], kind="mergesort")
+    events["cum"] = events.groupby("account_id", observed=True)["net"].cumsum()
 
-        events = events.sort_values("timestamp")
-        cumulative = events["net"].cumsum().values
+    counts = events.groupby("account_id", observed=True).size()
+    eligible = counts[counts >= 4].index
+    if len(eligible) == 0:
+        return set()
 
-        total_flow = df[
-            (df["sender_id"] == account) | (df["receiver_id"] == account)
-        ]["amount"].sum()
+    cum_std = events.groupby("account_id", observed=True)["cum"].std(ddof=0).reindex(eligible, fill_value=0.0)
+    total_flow = events["net"].abs().groupby(events["account_id"], observed=True).sum().reindex(eligible, fill_value=0.0)
+    valid = total_flow > 0
+    if not valid.any():
+        return set()
 
-        if total_flow == 0:
-            continue
-
-        std_cum = float(np.std(cumulative))
-        ratio = std_cum / total_flow
-
-        if ratio < 0.1:
-            flagged.add(str(account))
-
-    return flagged
+    ratio = (cum_std[valid] / total_flow[valid]).fillna(np.inf)
+    flagged_idx = ratio[ratio < 0.1].index
+    return {str(account) for account in flagged_idx}
 
 

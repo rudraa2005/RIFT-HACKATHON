@@ -32,6 +32,22 @@ def detect_cycles(G: nx.MultiDiGraph, df: pd.DataFrame) -> List[Dict[str, Any]]:
     simple_G = nx.DiGraph(G)
     suspicious_cycles = []
     ring_counter = 0
+    edge_stats: Dict[tuple[str, str], Dict[str, Any]] = {}
+    edge_cols = df[["sender_id", "receiver_id", "amount", "timestamp"]]
+    for row in edge_cols.itertuples(index=False):
+        key = (str(row.sender_id), str(row.receiver_id))
+        stats = edge_stats.get(key)
+        ts = pd.Timestamp(row.timestamp)
+        amt = float(row.amount)
+        if stats is None:
+            edge_stats[key] = {"sum": amt, "count": 1, "min_ts": ts, "max_ts": ts}
+        else:
+            stats["sum"] += amt
+            stats["count"] += 1
+            if ts < stats["min_ts"]:
+                stats["min_ts"] = ts
+            if ts > stats["max_ts"]:
+                stats["max_ts"] = ts
 
     # Optimization: Filter for SCCs of size >= MIN_CYCLE_LENGTH
     # simple_cycles is much faster when run per component
@@ -56,42 +72,48 @@ def detect_cycles(G: nx.MultiDiGraph, df: pd.DataFrame) -> List[Dict[str, Any]]:
             if len(cycle) < MIN_CYCLE_LENGTH or len(cycle) > MAX_CYCLE_LENGTH:
                 continue
 
-        amounts = []
-        timestamps = []
+            amounts = []
+            min_ts = None
+            max_ts = None
 
-        for i in range(len(cycle)):
-            u = cycle[i]
-            v = cycle[(i + 1) % len(cycle)]
-            if G.has_edge(u, v):
-                for _, data in G[u][v].items():
-                    amounts.append(data["amount"])
-                    timestamps.append(pd.Timestamp(data["timestamp"]))
+            for i in range(len(cycle)):
+                u = str(cycle[i])
+                v = str(cycle[(i + 1) % len(cycle)])
+                stats = edge_stats.get((u, v))
+                if stats is None:
+                    continue
+                avg_amount = stats["sum"] / max(stats["count"], 1)
+                amounts.append(avg_amount)
+                edge_min = stats["min_ts"]
+                edge_max = stats["max_ts"]
+                min_ts = edge_min if min_ts is None or edge_min < min_ts else min_ts
+                max_ts = edge_max if max_ts is None or edge_max > max_ts else max_ts
 
-        if not amounts or not timestamps:
-            continue
+            if not amounts or min_ts is None or max_ts is None:
+                continue
 
-        time_span = (max(timestamps) - min(timestamps)).total_seconds() / 3600
-        if time_span > CYCLE_TIME_SPAN_HOURS:
-            continue
+            time_span = (max_ts - min_ts).total_seconds() / 3600
+            if time_span > CYCLE_TIME_SPAN_HOURS:
+                continue
 
-        mean_amt = np.mean(amounts)
-        if mean_amt == 0:
-            continue
-        cv = float(np.std(amounts) / mean_amt)
-        if cv > CYCLE_AMOUNT_CV_THRESHOLD:
-            continue
+            mean_amt = np.mean(amounts)
+            if mean_amt == 0:
+                continue
+            cv = float(np.std(amounts) / mean_amt)
+            if cv > CYCLE_AMOUNT_CV_THRESHOLD:
+                continue
 
-        ring_counter += 1
-        suspicious_cycles.append(
-            {
-                "ring_id": f"RING_CYCLE_{ring_counter:03d}",
-                "members": list(cycle),
-                "pattern_type": f"cycle_length_{len(cycle)}",
-                "amounts": [round(a, 2) for a in amounts],
-                "time_span_hours": round(time_span, 2),
-                "cv": round(cv, 4),
-                "risk_score": round(min(100, 60 + (1 - cv) * 40), 2),
-            }
-        )
+            ring_counter += 1
+            suspicious_cycles.append(
+                {
+                    "ring_id": f"RING_CYCLE_{ring_counter:03d}",
+                    "members": [str(m) for m in cycle],
+                    "pattern_type": f"cycle_length_{len(cycle)}",
+                    "amounts": [round(float(a), 2) for a in amounts],
+                    "time_span_hours": round(time_span, 2),
+                    "cv": round(cv, 4),
+                    "risk_score": round(min(100, 60 + (1 - cv) * 40), 2),
+                }
+            )
 
     return suspicious_cycles

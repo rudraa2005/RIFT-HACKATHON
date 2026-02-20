@@ -11,7 +11,7 @@ services:
       - key: PYTHONPATH
         value: .
       - key: MAX_TRANSACTIONS
-        value: 3500
+        value: 10000
       - key: ANOMALY_SKIP_TX_THRESHOLD
         value: 5000
       - key: CENTRALITY_SKIP_TX_THRESHOLD

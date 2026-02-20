@@ -21,31 +21,31 @@ def detect_burst_diversity(df: pd.DataFrame) -> Tuple[Set[str], Dict[str, str]]:
     df = df.copy()
     if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
         df["timestamp"] = pd.to_datetime(df["timestamp"])
-    flagged: Set[str] = set()
-    trigger_times: Dict[str, str] = {}
+    incoming = df[["receiver_id", "sender_id", "timestamp"]]
+    if incoming.empty:
+        return set(), {}
 
-    for account in df["receiver_id"].unique():
-        incoming = df[df["receiver_id"] == account].sort_values("timestamp")
+    stats = incoming.groupby("receiver_id").agg(
+        total_txns=("sender_id", "size"),
+        unique_senders=("sender_id", "nunique"),
+        min_ts=("timestamp", "min"),
+        max_ts=("timestamp", "max"),
+    )
+    stats = stats[stats["total_txns"] >= 5]
+    if stats.empty:
+        return set(), {}
 
-        if len(incoming) < 5:
-            continue
+    stats["diversity"] = stats["unique_senders"] / stats["total_txns"]
+    stats["time_span_days"] = (stats["max_ts"] - stats["min_ts"]).dt.total_seconds() / 86400.0
 
-        unique_senders = incoming["sender_id"].nunique()
-        total_txns = len(incoming)
-        diversity = unique_senders / total_txns
+    hits = stats[
+        (stats["time_span_days"] <= MERCHANT_MIN_SPAN_DAYS)
+        & (stats["time_span_days"] < 30.0)
+        & (stats["diversity"] > 0.7)
+    ]
 
-        time_span_days = (
-            incoming["timestamp"].max() - incoming["timestamp"].min()
-        ).total_seconds() / 86400
-
-        if time_span_days > MERCHANT_MIN_SPAN_DAYS:
-            continue
-
-        if diversity > 0.7 and time_span_days < 30:
-            account_id = str(account)
-            flagged.add(account_id)
-            trigger_times[account_id] = str(incoming["timestamp"].max())
-
+    flagged = set(hits.index.astype(str))
+    trigger_times = {str(acct): str(ts) for acct, ts in hits["max_ts"].to_dict().items()}
     return flagged, trigger_times
 
 

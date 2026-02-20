@@ -30,7 +30,7 @@ function formatDate(iso) {
 export default function History() {
   const [selectedReport, setSelectedReport] = useState(null)
   const [loadingId, setLoadingId] = useState(null)
-  const { history, refreshHistory, getHistoryReport } = useAnalysis()
+  const { history, refreshHistory, getHistoryReport, historyError, isHistoryLoading } = useAnalysis()
 
   useEffect(() => {
     refreshHistory()
@@ -94,7 +94,23 @@ export default function History() {
                   </tr>
                 </thead>
                 <tbody className="text-sm">
-                  {history.length === 0 && (
+                  {historyError && (
+                    <tr>
+                      <td colSpan={7} className="py-6 px-6 text-center text-red-400">
+                        Failed to load history from backend: {historyError.message || 'Unknown error'}
+                      </td>
+                    </tr>
+                  )}
+
+                  {isHistoryLoading && !historyError && (
+                    <tr>
+                      <td colSpan={7} className="py-8 px-6 text-center text-slate-400">
+                        Loading history from backend...
+                      </td>
+                    </tr>
+                  )}
+
+                  {history.length === 0 && !isHistoryLoading && !historyError && (
                     <tr>
                       <td colSpan={7} className="py-10 px-6 text-center text-slate-400">
                         No history yet. Upload and analyze a CSV to create records.

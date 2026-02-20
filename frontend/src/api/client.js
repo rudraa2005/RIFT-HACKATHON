@@ -1,4 +1,32 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const rawBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const API_BASE_URL = String(rawBaseUrl).replace(/\/+$/, '')
+
+function buildUrl(path) {
+  const normalizedPath = String(path).startsWith('/') ? path : `/${path}`
+  return `${API_BASE_URL}${normalizedPath}`
+}
+
+async function request(path, options = {}) {
+  const controller = new AbortController()
+  const timeoutMs = Number(import.meta.env.VITE_API_TIMEOUT_MS || 45000)
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(buildUrl(path), {
+      cache: 'no-store',
+      ...options,
+      signal: controller.signal,
+    })
+    return handleResponse(res)
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error('Request timed out while contacting backend.')
+    }
+    throw err
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
 
 async function handleResponse(res) {
   if (!res.ok) {
@@ -20,30 +48,24 @@ export async function uploadCsv(file) {
   const formData = new FormData()
   formData.append('file', file)
 
-  const res = await fetch(`${API_BASE_URL}/upload`, {
+  return request('/upload', {
     method: 'POST',
     body: formData,
   })
-
-  return handleResponse(res)
 }
 
 export async function fetchHealth() {
-  const res = await fetch(`${API_BASE_URL}/health`)
-  return handleResponse(res)
+  return request('/health')
 }
 
 export async function fetchMetrics() {
-  const res = await fetch(`${API_BASE_URL}/metrics`)
-  return handleResponse(res)
+  return request('/metrics')
 }
 
 export async function fetchHistory() {
-  const res = await fetch(`${API_BASE_URL}/history`)
-  return handleResponse(res)
+  return request('/history')
 }
 
 export async function fetchHistoryReport(runId) {
-  const res = await fetch(`${API_BASE_URL}/history/${encodeURIComponent(runId)}`)
-  return handleResponse(res)
+  return request(`/history/${encodeURIComponent(runId)}`)
 }

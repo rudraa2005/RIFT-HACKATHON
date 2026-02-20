@@ -14,7 +14,6 @@ Memory: O(V)
 
 from typing import Any, Dict, Set, Tuple
 
-import numpy as np
 import pandas as pd
 
 from app.config import FORWARDING_LATENCY_MEDIAN_HOURS
@@ -43,39 +42,47 @@ def detect_rapid_forwarding(
     flagged: Set[str] = set()
     details: Dict[str, Dict[str, Any]] = {}
 
-    all_accounts = set(df["sender_id"].unique()) & set(df["receiver_id"].unique())
+    incoming = (
+        df[["receiver_id", "timestamp"]]
+        .rename(columns={"receiver_id": "account_id", "timestamp": "in_ts"})
+        .sort_values(["in_ts", "account_id"])
+    )
+    outgoing = (
+        df[["sender_id", "timestamp"]]
+        .rename(columns={"sender_id": "account_id", "timestamp": "out_ts"})
+        .sort_values(["out_ts", "account_id"])
+    )
+    if incoming.empty or outgoing.empty:
+        return flagged, details
 
-    for account in all_accounts:
-        incoming = df[df["receiver_id"] == account].sort_values("timestamp")
-        outgoing = df[df["sender_id"] == account].sort_values("timestamp")
+    # Find the next outgoing txn for each incoming txn, per account.
+    merged = pd.merge_asof(
+        incoming,
+        outgoing,
+        left_on="in_ts",
+        right_on="out_ts",
+        by="account_id",
+        direction="forward",
+    ).dropna(subset=["out_ts"])
+    if merged.empty:
+        return flagged, details
 
-        if incoming.empty or outgoing.empty:
-            continue
+    merged["latency_h"] = (merged["out_ts"] - merged["in_ts"]).dt.total_seconds() / 3600.0
+    merged = merged[merged["latency_h"] >= 0]
+    if merged.empty:
+        return flagged, details
 
-        out_times = outgoing["timestamp"].values
+    stats = merged.groupby("account_id")["latency_h"].agg(["count", "mean", "median"])
+    stats = stats[stats["count"] >= 2]
+    stats = stats[stats["median"] < FORWARDING_LATENCY_MEDIAN_HOURS]
 
-        latencies = []
-        for _, in_row in incoming.iterrows():
-            in_ts = in_row["timestamp"]
-            # Find next outgoing after this incoming
-            future_outs = out_times[out_times >= np.datetime64(in_ts)]
-            if len(future_outs) > 0:
-                next_out_ts = pd.Timestamp(future_outs[0])
-                latency_h = (next_out_ts - in_ts).total_seconds() / 3600
-                latencies.append(max(0, latency_h))
-
-        if len(latencies) < 2:
-            continue
-
-        avg_latency = float(np.mean(latencies))
-        median_latency = float(np.median(latencies))
-
-        if median_latency < FORWARDING_LATENCY_MEDIAN_HOURS:
-            flagged.add(str(account))
-            details[str(account)] = {
-                "avg_latency_hours": round(avg_latency, 2),
-                "median_latency_hours": round(median_latency, 2),
-            }
+    for account, row in stats.iterrows():
+        acc = str(account)
+        flagged.add(acc)
+        details[acc] = {
+            "avg_latency_hours": round(float(row["mean"]), 2),
+            "median_latency_hours": round(float(row["median"]), 2),
+        }
 
     return flagged, details
 

@@ -10,6 +10,8 @@ export function AnalysisProvider({ children }) {
   const [health, setHealth] = useState(null)
   const [isUploading, setIsUploading] = useState(false)
   const [error, setError] = useState(null)
+  const [historyError, setHistoryError] = useState(null)
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
 
   const refreshHealth = useCallback(async () => {
     try {
@@ -24,17 +26,23 @@ export function AnalysisProvider({ children }) {
     try {
       const data = await fetchMetrics()
       setMetrics(data)
-    } catch {
+    } catch (err) {
       // best-effort only
+      console.warn('Failed to fetch metrics:', err)
     }
   }, [])
 
   const refreshHistory = useCallback(async () => {
+    setIsHistoryLoading(true)
     try {
       const data = await fetchHistory()
       setHistory(Array.isArray(data?.items) ? data.items : [])
-    } catch {
-      // best-effort only
+      setHistoryError(null)
+    } catch (err) {
+      setHistory([])
+      setHistoryError(err)
+    } finally {
+      setIsHistoryLoading(false)
     }
   }, [])
 
@@ -44,9 +52,11 @@ export function AnalysisProvider({ children }) {
   }, [])
 
   useEffect(() => {
-    // warm up health on first load so UI can reflect backend status
+    // Warm up backend-dependent sections on first load.
     refreshHealth()
-  }, [refreshHealth])
+    refreshMetrics()
+    refreshHistory()
+  }, [refreshHealth, refreshMetrics, refreshHistory])
 
   const uploadAndAnalyze = useCallback(
     async (file) => {
@@ -76,6 +86,8 @@ export function AnalysisProvider({ children }) {
     health,
     isUploading,
     error,
+    historyError,
+    isHistoryLoading,
     uploadAndAnalyze,
     refreshHealth,
     refreshMetrics,

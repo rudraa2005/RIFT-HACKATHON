@@ -25,36 +25,35 @@ def detect_merchants(df: pd.DataFrame) -> Set[str]:
     df = df.copy()
     if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
         df["timestamp"] = pd.to_datetime(df["timestamp"])
-    merchants: Set[str] = set()
+    grouped = df.groupby("receiver_id").agg(
+        unique_senders=("sender_id", "nunique"),
+        min_ts=("timestamp", "min"),
+        max_ts=("timestamp", "max"),
+        mean_amt=("amount", "mean"),
+        std_amt=("amount", "std"),
+        total_txns=("amount", "size"),
+    )
+    if grouped.empty:
+        return set()
 
-    for account in df["receiver_id"].unique():
-        incoming = df[df["receiver_id"] == account]
+    grouped["span_days"] = (grouped["max_ts"] - grouped["min_ts"]).dt.days
+    grouped["std_amt"] = grouped["std_amt"].fillna(0.0)
+    grouped["cv"] = grouped["std_amt"] / grouped["mean_amt"].replace(0, pd.NA)
 
-        # More lenient: if many unique senders over time, likely merchant
-        unique_senders = incoming["sender_id"].nunique()
-        if unique_senders < MERCHANT_MIN_COUNTERPARTIES:
-            continue
-
-        span_days = (incoming["timestamp"].max() - incoming["timestamp"].min()).days
-        if span_days < MERCHANT_MIN_SPAN_DAYS:
-            continue
-
-        # Check for varied amounts (merchants have diverse transaction sizes)
-        mean_amt = incoming["amount"].mean()
-        if mean_amt > 0 and len(incoming) > 1:
-            cv = incoming["amount"].std() / mean_amt
-            if cv > 0.5:
-                merchants.add(str(account))
-        
-        # Also check: if account receives from many different senders with small-medium amounts
-        # and has reasonable time span, likely merchant
-        if unique_senders >= 10 and span_days >= 30:
-            avg_amount = incoming["amount"].mean()
-            # Typical merchant transactions: not too large, not too small
-            if 100 <= avg_amount <= 10000:
-                merchants.add(str(account))
-
-    return merchants
+    base = (
+        (grouped["unique_senders"] >= MERCHANT_MIN_COUNTERPARTIES)
+        & (grouped["span_days"] >= MERCHANT_MIN_SPAN_DAYS)
+        & (grouped["mean_amt"] > 0)
+        & (grouped["total_txns"] > 1)
+    )
+    varied = base & (grouped["cv"].fillna(0.0) > 0.5)
+    wide_small_medium = (
+        (grouped["unique_senders"] >= 10)
+        & (grouped["span_days"] >= 30)
+        & (grouped["mean_amt"] >= 100)
+        & (grouped["mean_amt"] <= 10000)
+    )
+    return set(grouped[varied | wide_small_medium].index.astype(str))
 
 
 def detect_payroll(df: pd.DataFrame) -> Set[str]:
@@ -62,34 +61,41 @@ def detect_payroll(df: pd.DataFrame) -> Set[str]:
     df = df.copy()
     if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
         df["timestamp"] = pd.to_datetime(df["timestamp"])
-    payroll: Set[str] = set()
+    outgoing = df[["sender_id", "receiver_id", "amount", "timestamp"]].copy()
+    if outgoing.empty:
+        return set()
 
-    # Detect payroll senders (companies paying employees)
-    for account in df["sender_id"].unique():
-        outgoing = df[df["sender_id"] == account]
-        if len(outgoing) < 5:
-            continue
+    outgoing["month"] = outgoing["timestamp"].dt.to_period("M")
+    sender_stats = outgoing.groupby("sender_id").agg(
+        total_txns=("amount", "size"),
+        mean_amt=("amount", "mean"),
+        std_amt=("amount", "std"),
+    )
+    sender_stats = sender_stats[sender_stats["total_txns"] >= 5]
+    if sender_stats.empty:
+        return set()
 
-        outgoing = outgoing.copy()
-        outgoing["month"] = outgoing["timestamp"].dt.to_period("M")
-        monthly_counts = outgoing.groupby("month").size()
+    monthly = outgoing.groupby(["sender_id", "month"]).size().rename("month_count").reset_index()
+    month_summary = monthly.groupby("sender_id").agg(
+        months_seen=("month", "nunique"),
+        months_with_3plus=("month_count", lambda s: int((s >= 3).sum())),
+    )
+    sender_stats = sender_stats.join(month_summary, how="left").fillna(0)
+    sender_stats["cv"] = sender_stats["std_amt"].fillna(0.0) / sender_stats["mean_amt"].replace(0, pd.NA)
 
-        if len(monthly_counts) < PAYROLL_MIN_MONTHS:
-            continue
+    payroll_senders = sender_stats[
+        (sender_stats["months_seen"] >= PAYROLL_MIN_MONTHS)
+        & (sender_stats["months_with_3plus"] >= PAYROLL_MIN_MONTHS)
+        & (sender_stats["mean_amt"] > 0)
+        & (sender_stats["cv"].fillna(1.0) < PAYROLL_SIMILAR_AMOUNT_CV)
+    ].index.astype(str)
 
-        if (monthly_counts >= 3).sum() < PAYROLL_MIN_MONTHS:
-            continue
+    payroll: Set[str] = set(payroll_senders)
+    if len(payroll_senders) == 0:
+        return payroll
 
-        mean_amt = outgoing["amount"].mean()
-        if mean_amt == 0:
-            continue
-        cv = outgoing["amount"].std() / mean_amt
-        if cv < PAYROLL_SIMILAR_AMOUNT_CV:
-            payroll.add(str(account))
-            # Also mark all recipients as payroll recipients (legitimate employees)
-            for recipient in outgoing["receiver_id"].unique():
-                payroll.add(str(recipient))
-
+    recipient_ids = outgoing[outgoing["sender_id"].astype(str).isin(payroll_senders)]["receiver_id"].astype(str).unique()
+    payroll.update(recipient_ids.tolist())
     return payroll
 
 
