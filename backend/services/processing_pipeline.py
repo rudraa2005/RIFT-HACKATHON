@@ -32,6 +32,7 @@ Performance: < 30s for 10K transactions.
 Memory: O(V + E) for graph + O(R) for rings.
 """
 
+import contextlib
 import logging
 import os
 import time
@@ -140,7 +141,6 @@ def warmup_ml_model() -> bool:
         return False
 
 
-import contextlib
 
 @contextlib.contextmanager
 def log_timer(label: str):

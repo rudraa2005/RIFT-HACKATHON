@@ -12,10 +12,15 @@ Time Complexity: O(V + E) * (V-1)! worst-case for simple_cycles,
 Memory: O(V * L) for storing discovered cycles.
 """
 
+import logging
+import time
+
 import networkx as nx
 import numpy as np
 import pandas as pd
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 from app.config import (
     CYCLE_AMOUNT_CV_THRESHOLD,

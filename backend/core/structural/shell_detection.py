@@ -7,10 +7,14 @@ Time Complexity: O(V × 3^D) bounded by shell degree ≤ 3, D = max depth (cappe
 Memory: O(V + chains × chain_length)
 """
 
+import logging
+import time
 from typing import Any, Dict, List, Set, Tuple
 
 import networkx as nx
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from app.config import (
     SHELL_HOLDING_TIME_HOURS,
