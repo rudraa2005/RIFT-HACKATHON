@@ -164,16 +164,13 @@ class ProcessingService:
         df = df.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-        # Cap at MAX_TRANSACTIONS for performance
-        if len(df) > MAX_TRANSACTIONS:
-            logger.warning(
-                "Dataset has %d transactions, sampling down to %d",
-                len(df), MAX_TRANSACTIONS,
-            )
-            df = df.sample(n=MAX_TRANSACTIONS, random_state=42)
-
-        # 0. Compute Adaptive Thresholds
+        # 0. Start Timer
         t_start = time.time()
+        
+        # Removed sampling to satisfy user requirement for analyzing ALL data.
+        # However, we will use hard timeouts per module to keep total time under 30s.
+
+        # 0.5 Compute Adaptive Thresholds
         thresholds = compute_adaptive_thresholds(df)
         logger.info("Adaptive thresholds computed: %s", thresholds)
 
@@ -495,91 +492,69 @@ class ProcessingService:
                 )
                 model = None
 
-        # 22. ML feature vector construction (only when model is available)
-        if model is not None:
-            all_accounts = set(df["sender_id"].unique()) | set(
-                df["receiver_id"].unique()
-            )
-            feature_vectors, account_list = build_feature_vectors(
-                all_accounts=all_accounts,
-                cycle_accounts=cycle_accounts,
-                aggregators=aggregators,
-                dispersers=dispersers,
-                shell_accounts=shell_accounts,
-                high_velocity=high_velocity,
-                rapid_pass_through=rapid_pt_accounts,
-                activity_spike=spike_accounts,
-                high_centrality=centrality_accounts,
-                low_retention=retention_accounts,
-                high_throughput=throughput_accounts,
-                balance_oscillation=oscillation_accounts,
-                burst_diversity=diversity_accounts,
-                scc_members=scc_accounts,
-                cascade_depth=cascade_accounts,
-                irregular_activity=irregular_accounts,
-                high_closeness=closeness_accounts,
-                high_clustering=clustering_accounts,
-                rapid_forwarding=forwarding_accounts,
-                dormant_activation=dormant_accounts,
-                structured_fragmentation=structuring_accounts,
-                G=G,
-                df=df,
-            )
-            X = vectors_to_matrix(feature_vectors, account_list)
-            probs = model.predict(X)
-            ml_scores = {
-                acct: float(prob)
-                for acct, prob in zip(account_list, probs)
-            }
-            logger.info("ML scoring completed for %d accounts", len(ml_scores))
-        elif ML_ENABLED:
-            # Deployment fallback: bootstrap a lightweight logistic model from rule-based pseudo labels.
-            all_accounts = set(df["sender_id"].unique()) | set(
-                df["receiver_id"].unique()
-            )
-            feature_vectors, account_list = build_feature_vectors(
-                all_accounts=all_accounts,
-                cycle_accounts=cycle_accounts,
-                aggregators=aggregators,
-                dispersers=dispersers,
-                shell_accounts=shell_accounts,
-                high_velocity=high_velocity,
-                rapid_pass_through=rapid_pt_accounts,
-                activity_spike=spike_accounts,
-                high_centrality=centrality_accounts,
-                low_retention=retention_accounts,
-                high_throughput=throughput_accounts,
-                balance_oscillation=oscillation_accounts,
-                burst_diversity=diversity_accounts,
-                scc_members=scc_accounts,
-                cascade_depth=cascade_accounts,
-                irregular_activity=irregular_accounts,
-                high_closeness=closeness_accounts,
-                high_clustering=clustering_accounts,
-                rapid_forwarding=forwarding_accounts,
-                dormant_activation=dormant_accounts,
-                structured_fragmentation=structuring_accounts,
-                G=G,
-                df=df,
-            )
-            X = vectors_to_matrix(feature_vectors, account_list)
-            y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= 50.0 else 0 for a in account_list], dtype=np.int32)
-            if y.sum() == 0 or y.sum() == len(y):
-                # Ensure both classes exist for logistic fit.
-                cutoff = float(np.percentile([normalized.get(a, {}).get("score", 0.0) for a in account_list], 80)) if account_list else 50.0
-                y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= cutoff else 0 for a in account_list], dtype=np.int32)
-            try:
-                bootstrap_model = RiskModel()
-                bootstrap_model.train(X, y)
-                _cache_runtime_model(bootstrap_model)
-                probs = bootstrap_model.predict(X)
-                ml_scores = {
-                    acct: float(prob)
-                    for acct, prob in zip(account_list, probs)
-                }
-                logger.info("Bootstrapped runtime ML model for %d accounts", len(ml_scores))
-            except Exception as e:
-                logger.warning("Runtime ML bootstrap failed; keeping rule-only scoring: %s", e)
+        # 22. ML Risk Scoring (High-Speed Inference with 20s Bailout)
+        ml_scores = None
+        if ML_ENABLED:
+            with log_timer("ml_feature_vector_building"):
+                feature_vectors, account_list = build_feature_vectors(
+                    all_accounts=all_accounts,
+                    cycle_accounts=cycle_accounts,
+                    aggregators=aggregators,
+                    dispersers=dispersers,
+                    shell_accounts=shell_accounts,
+                    high_velocity=high_velocity,
+                    rapid_pass_through=rapid_pt_accounts,
+                    activity_spike=spike_accounts,
+                    high_centrality=centrality_accounts,
+                    low_retention=retention_accounts,
+                    high_throughput=throughput_accounts,
+                    balance_oscillation=oscillation_accounts,
+                    burst_diversity=diversity_accounts,
+                    scc_members=scc_accounts,
+                    cascade_depth=cascade_accounts,
+                    irregular_activity=irregular_accounts,
+                    high_closeness=closeness_accounts,
+                    high_clustering=clustering_accounts,
+                    rapid_forwarding=forwarding_accounts,
+                    dormant_activation=dormant_accounts,
+                    structured_fragmentation=structuring_accounts,
+                    G=G,
+                    df=df,
+                )
+
+            # Global bailout check: ensure we reach 30s deadline
+            current_elapsed = time.time() - t_start
+            if current_elapsed > 20.0:
+                logger.warning("Bailing out of ML inference: pipeline spent %.2fs already. Accuracy shifted to Rule Engine.", current_elapsed)
+            elif model and model.is_trained:
+                with log_timer("ml_inference_primary"):
+                    try:
+                        X = vectors_to_matrix(feature_vectors, account_list)
+                        probs = model.predict(X)
+                        ml_scores = {acct: float(prob) for acct, prob in zip(account_list, probs)}
+                        logger.info("Primary ML scoring completed for %d accounts", len(ml_scores))
+                    except Exception as e:
+                        logger.error("Primary ML inference failed: %s", str(e))
+            else:
+                # Deployment fallback: bootstrap a lightweight model if primary fails/missing
+                with log_timer("ml_inference_bootstrap"):
+                    try:
+                        X = vectors_to_matrix(feature_vectors, account_list)
+                        y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= 50.0 else 0 for a in account_list], dtype=np.int32)
+                        
+                        if y.sum() == 0 or y.sum() == len(y):
+                            valid_scores = [normalized.get(a, {}).get("score", 0.0) for a in account_list]
+                            cutoff = float(np.percentile(valid_scores, 80)) if valid_scores else 50.0
+                            y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= cutoff else 0 for a in account_list], dtype=np.int32)
+                            
+                        bootstrap_model = RiskModel()
+                        bootstrap_model.train(X, y)
+                        _cache_runtime_model(bootstrap_model)
+                        probs = bootstrap_model.predict(X)
+                        ml_scores = {acct: float(prob) for acct, prob in zip(account_list, probs)}
+                        logger.info("Bootstrapped runtime ML model for %d accounts", len(ml_scores))
+                    except Exception as e:
+                        logger.warning("Runtime ML bootstrap failed; keeping rule-only scoring: %s", e)
 
         normalized = compute_hybrid_scores(normalized, ml_scores)
 

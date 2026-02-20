@@ -11,11 +11,11 @@ services:
       - key: PYTHONPATH
         value: .
       - key: MAX_TRANSACTIONS
-        value: 2000
+        value: 100000
       - key: ANOMALY_SKIP_TX_THRESHOLD
-        value: 2500
+        value: 50000
       - key: CENTRALITY_SKIP_TX_THRESHOLD
-        value: 800
+        value: 50000
       - key: MAX_GRAPH_NODES_RESPONSE
         value: 800
       - key: MAX_GRAPH_EDGES_RESPONSE

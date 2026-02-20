@@ -42,7 +42,7 @@ def detect_cycles(G: nx.MultiDiGraph, df: pd.DataFrame) -> List[Dict[str, Any]]:
     # simple_cycles is much faster when run per component
     sccs = [c for c in nx.strongly_connected_components(simple_G) if len(c) >= MIN_CYCLE_LENGTH]
 
-    MAX_CANDIDATE_CYCLES = 1000
+    MAX_CANDIDATE_CYCLES = 200
 
     start_time = time.time()
     for component in sccs:
