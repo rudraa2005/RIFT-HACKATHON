@@ -10,16 +10,23 @@ services:
         value: 3.11.7
       - key: PYTHONPATH
         value: .
+      - key: DETECTOR_WORKERS
+        value: "1"
       - key: MAX_TRANSACTIONS
-        value: 100000
+        value: "100000"
       - key: ANOMALY_SKIP_TX_THRESHOLD
-        value: 2500
+        value: "2500"
       - key: CENTRALITY_SKIP_TX_THRESHOLD
-        value: 1200
+        value: "1200"
       - key: MAX_GRAPH_NODES_RESPONSE
         value: 800
       - key: MAX_GRAPH_EDGES_RESPONSE
         value: 1200
+      - key: PORT
+        value: "10000"
+    healthCheckPath: /health
+    initialDelaySeconds: 30
+    periodSeconds: 60
     autoDeploy: false
 
   # Frontend (React/Vite Static Site)

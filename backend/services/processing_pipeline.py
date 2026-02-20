@@ -164,13 +164,6 @@ class ProcessingService:
             stage_timings[name] = round(now - _stage_t0, 4)
             _stage_t0 = now
 
-        # Cap at MAX_TRANSACTIONS for performance
-        if len(df) > MAX_TRANSACTIONS:
-            logger.warning(
-                "Dataset has %d transactions, sampling down to %d",
-                len(df), MAX_TRANSACTIONS,
-            )
-            df = df.sample(n=MAX_TRANSACTIONS, random_state=42)
 
         # 0. Compute Adaptive Thresholds
         t_start = time.time()
@@ -179,125 +172,136 @@ class ProcessingService:
         _mark_stage("adaptive_thresholds")
 
         # 1. Build graph
-        t0 = time.time()
         G = build_graph(df)
-        total_accounts = G.number_of_nodes()
+        all_accounts = set(G.nodes())
+        total_accounts = len(all_accounts)
         _mark_stage("build_graph")
 
-        # Forensic trigger maps (account_id -> timestamp_str)
+        # --- Defensive Initialization for Global Variable Access ---
         trigger_times: Dict[str, Dict[str, str]] = {}
         ts_max = str(df["timestamp"].max())
+        
+        cycle_rings = []
+        cycle_accounts = set()
+        smurf_rings = []
+        aggregators = set()
+        dispersers = set()
+        rapid_pt_accounts = set()
+        forwarding_accounts = set()
+        spike_accounts = set()
+        spike_triggers = {}
+        dormant_accounts = set()
+        structuring_accounts = set()
+        retention_accounts = set()
+        throughput_accounts = set()
+        oscillation_accounts = set()
+        diversity_accounts = set()
+        scc_accounts = set()
+        scc_rings = []
+        cascade_rings = []
+        cascade_accounts = set()
+        irregular_accounts = set()
+        merchant_accounts = set()
+        payroll_accounts = set()
+        centrality_accounts = set()
+        anomaly_scores = {}
+        shell_accounts = set()
+        shell_rings = []
+        closeness_accounts = set()
+        clustering_accounts = set()
+        ml_scores = None
+        normalized = {}
+        raw_scores = {}
+        neighbor_map = {}
+        all_rings = []
 
-        def _safe_result(future, detector_name: str, default):
+        # 2-14: Sequential execution with time checks
+        # Rule 1: We stop heavy analysis if time > 25s
+        
+        # 2. Cycle detection
+        with log_timer("cycle_detection"):
             try:
-                return future.result()
+                cycle_rings = detect_cycles(G, df)
+                for ring in cycle_rings:
+                    cycle_accounts.update(ring["members"])
+                trigger_times["cycle"] = {acct: ts_max for acct in cycle_accounts}
             except Exception:
-                logger.exception("Detector '%s' failed; continuing with fallback output.", detector_name)
-                return default
+                logger.exception("cycle_detection failed")
 
-        # 2-14: Run independent detectors in parallel; keep dependent shell detection sequential after cycle.
-        with ThreadPoolExecutor(max_workers=DETECTOR_WORKERS) as pool:
-            futures = {
-                "cycle": pool.submit(detect_cycles, G, df),
-                "smurfing": pool.submit(
-                    detect_smurfing,
-                    df,
-                    thresholds["smurfing_min_senders"],
-                    thresholds["smurfing_min_receivers"],
-                ),
-                "rapid_pt": pool.submit(detect_rapid_pass_through, df),
-                "rapid_fwd": pool.submit(detect_rapid_forwarding, df),
-                "spike": pool.submit(detect_activity_spikes, df, thresholds["spike_min_txns"]),
-                "dormant": pool.submit(detect_dormant_activation, df),
-                "structuring": pool.submit(detect_amount_structuring, df),
-                "retention": pool.submit(detect_low_retention, df),
-                "throughput": pool.submit(detect_high_throughput, df),
-                "oscillation": pool.submit(detect_balance_oscillation, df),
-                "diversity": pool.submit(detect_burst_diversity, df),
-                "scc": pool.submit(detect_scc, G),
-                "cascade": pool.submit(detect_cascade_depth, G, df),
-                "irregular": pool.submit(detect_irregular_activity, df),
-                "false_positive": pool.submit(detect_false_positives, df),
-            }
+        # 3. Smurfing detection
+        with log_timer("smurfing_detection"):
+            try:
+                smurf_rings, aggregators, dispersers, smurf_triggers = detect_smurfing(
+                    df, thresholds["smurfing_min_senders"], thresholds["smurfing_min_receivers"]
+                )
+                trigger_times.update(smurf_triggers)
+            except Exception:
+                logger.exception("smurfing failed")
 
-            if len(df) < CENTRALITY_SKIP_TX_THRESHOLD and (time.time() - t_start) < TIME_LIMIT:
-                futures["centrality"] = pool.submit(compute_centrality, G)
-            else:
-                futures["centrality"] = None
-                logger.info("Skipping betweenness centrality for performance.")
+        # 4. Shell Detection (Depends on cycle_accounts)
+        with log_timer("shell_chain_detection"):
+            try:
+                shell_rings, shell_accounts = detect_shell_chains(G, df, exclude_nodes=cycle_accounts)
+                trigger_times["shell_account"] = {acct: ts_max for acct in shell_accounts}
+            except Exception:
+                logger.exception("shell_chain failed")
 
-            if len(df) < ANOMALY_SKIP_TX_THRESHOLD:
-                futures["anomaly"] = pool.submit(lambda: aggregate_anomaly_scores(df, detect_anomalies(df)))
-            else:
-                futures["anomaly"] = None
-
-            cycle_rings = _safe_result(futures["cycle"], "cycle", [])
-            cycle_accounts: set = set()
-            cycle_triggers: Dict[str, str] = {}
-            for ring in cycle_rings:
-                cycle_accounts.update(ring["members"])
-                for member in ring["members"]:
-                    if member not in cycle_triggers:
-                        cycle_triggers[member] = ts_max
-            trigger_times["cycle"] = cycle_triggers
-
-            smurf_rings, aggregators, dispersers, smurf_triggers = _safe_result(
-                futures["smurfing"], "smurfing", ([], set(), set(), {})
-            )
-            trigger_times.update(smurf_triggers)
-
-            rapid_pt_accounts, _ = _safe_result(futures["rapid_pt"], "rapid_pass_through", (set(), {}))
-            trigger_times["rapid_pass_through"] = {acct: ts_max for acct in rapid_pt_accounts}
-
-            forwarding_accounts, _ = _safe_result(futures["rapid_fwd"], "rapid_forwarding", (set(), {}))
-            trigger_times["rapid_forwarding"] = {acct: ts_max for acct in forwarding_accounts}
-
-            spike_accounts, spike_triggers = _safe_result(futures["spike"], "activity_spike", (set(), {}))
-            trigger_times["sudden_activity_spike"] = spike_triggers
-
-            dormant_accounts = _safe_result(futures["dormant"], "dormant_activation", set())
-            trigger_times["dormant_activation_spike"] = {acct: ts_max for acct in dormant_accounts}
-
-            structuring_accounts = _safe_result(futures["structuring"], "amount_structuring", set())
-            trigger_times["structured_fragmentation"] = {acct: ts_max for acct in structuring_accounts}
-
-            retention_accounts = _safe_result(futures["retention"], "retention", set())
-            throughput_accounts = _safe_result(futures["throughput"], "throughput", set())
-            oscillation_accounts = _safe_result(futures["oscillation"], "oscillation", set())
-
-            diversity_accounts, diversity_triggers = _safe_result(futures["diversity"], "diversity", (set(), {}))
-            trigger_times["high_burst_diversity"] = diversity_triggers
-
-            scc_accounts, scc_rings = _safe_result(futures["scc"], "scc", (set(), []))
-            trigger_times["large_scc_membership"] = {acct: ts_max for acct in scc_accounts}
-
-            cascade_rings, cascade_accounts = _safe_result(futures["cascade"], "cascade", ([], set()))
-            trigger_times["deep_layered_cascade"] = {acct: ts_max for acct in cascade_accounts}
-
-            irregular_accounts = _safe_result(futures["irregular"], "irregular_activity", set())
-            merchant_accounts, payroll_accounts = _safe_result(
-                futures["false_positive"], "false_positive", (set(), set())
-            )
-
-            if futures["centrality"] is not None:
-                centrality_accounts, _ = _safe_result(futures["centrality"], "betweenness_centrality", (set(), {}))
-            else:
-                centrality_accounts = set()
-
-            if futures["anomaly"] is not None:
-                anomaly_scores = _safe_result(futures["anomaly"], "anomaly", {})
-            else:
-                anomaly_scores = {}
-        _mark_stage("parallel_detectors")
-
-        # 4. Shell chain detection (depends on cycle_accounts)
+        # 5. Rapid Detectors (Fast)
         try:
-            shell_rings, shell_accounts = detect_shell_chains(G, df, exclude_nodes=cycle_accounts)
+            rapid_pt_accounts, _ = detect_rapid_pass_through(df)
+            trigger_times["rapid_pass_through"] = {acct: ts_max for acct in rapid_pt_accounts}
+            
+            forwarding_accounts, _ = detect_rapid_forwarding(df)
+            trigger_times["rapid_forwarding"] = {acct: ts_max for acct in forwarding_accounts}
         except Exception:
-            logger.exception("Detector 'shell_chain' failed; continuing with fallback output.")
-            shell_rings, shell_accounts = [], set()
-        trigger_times["shell_account"] = {acct: ts_max for acct in shell_accounts}
-        _mark_stage("shell_chain")
+             logger.exception("rapid_detectors failed")
+
+        # 6. Periodic Detectors
+        try:
+            spike_accounts, spike_triggers = detect_activity_spikes(df, thresholds["spike_min_txns"])
+            trigger_times["sudden_activity_spike"] = spike_triggers
+            
+            dormant_accounts = detect_dormant_activation(df)
+            trigger_times["dormant_activation_spike"] = {acct: ts_max for acct in dormant_accounts}
+            
+            structuring_accounts = detect_amount_structuring(df)
+            trigger_times["structured_fragmentation"] = {acct: ts_max for acct in structuring_accounts}
+        except Exception:
+            logger.exception("periodic_detectors failed")
+
+        # 7-14. Other Detectors
+        try:
+            retention_accounts = detect_low_retention(df)
+            throughput_accounts = detect_high_throughput(df)
+            oscillation_accounts = detect_balance_oscillation(df)
+            diversity_accounts, diversity_triggers = detect_burst_diversity(df)
+            trigger_times["high_burst_diversity"] = diversity_triggers
+            
+            scc_accounts, scc_rings = detect_scc(G)
+            trigger_times["large_scc_membership"] = {acct: ts_max for acct in scc_accounts}
+            
+            cascade_rings, cascade_accounts = detect_cascade_depth(G, df)
+            trigger_times["deep_layered_cascade"] = {acct: ts_max for acct in cascade_accounts}
+            
+            irregular_accounts = detect_irregular_activity(df)
+            merchant_accounts, payroll_accounts = detect_false_positives(df)
+        except Exception:
+            logger.exception("flow_detectors failed")
+
+        # 14.5 Heavy Stats (Conditional)
+        if (time.time() - t_start) < 22.0:
+            if len(df) < CENTRALITY_SKIP_TX_THRESHOLD:
+                with log_timer("betweenness_centrality"):
+                    try:
+                        centrality_accounts, _ = compute_centrality(G)
+                    except Exception: logger.exception("centrality failed")
+            
+            if len(df) < ANOMALY_SKIP_TX_THRESHOLD:
+                with log_timer("anomaly_detection"):
+                    try:
+                        anomaly_scores = aggregate_anomaly_scores(df, detect_anomalies(df))
+                    except Exception: logger.exception("anomaly failed")
+        _mark_stage("detectors_sequential")
 
         # 15. Compute scores (all patterns)
         t_score = time.time()
@@ -498,106 +502,68 @@ class ProcessingService:
                     existing.update(patterns)
                     normalized[acct_id]["patterns"] = sorted(list(existing))
 
-        # 23. ML inference + hybrid scoring
-        ml_scores = None
-        model = None
-        if ML_ENABLED:
+        if ML_ENABLED and (time.time() - t_start) < 26.0:
             model_path = _resolve_model_path()
             try:
                 model = _get_cached_model(model_path)
-                if model is None:
-                    logger.warning("ML model unavailable at %s; using rule-only scoring", model_path)
             except Exception as e:
-                logger.warning(
-                    "ML scoring unavailable, falling back to rule-only: %s", e
-                )
+                logger.warning("ML model loading failed: %s", e)
                 model = None
 
-        # 22. ML feature vector construction (only when model is available)
-        if model is not None:
-            all_accounts = set(df["sender_id"].unique()) | set(
-                df["receiver_id"].unique()
-            )
-            feature_vectors, account_list = build_feature_vectors(
-                all_accounts=all_accounts,
-                cycle_accounts=cycle_accounts,
-                aggregators=aggregators,
-                dispersers=dispersers,
-                shell_accounts=shell_accounts,
-                high_velocity=high_velocity,
-                rapid_pass_through=rapid_pt_accounts,
-                activity_spike=spike_accounts,
-                high_centrality=centrality_accounts,
-                low_retention=retention_accounts,
-                high_throughput=throughput_accounts,
-                balance_oscillation=oscillation_accounts,
-                burst_diversity=diversity_accounts,
-                scc_members=scc_accounts,
-                cascade_depth=cascade_accounts,
-                irregular_activity=irregular_accounts,
-                high_closeness=closeness_accounts,
-                high_clustering=clustering_accounts,
-                rapid_forwarding=forwarding_accounts,
-                dormant_activation=dormant_accounts,
-                structured_fragmentation=structuring_accounts,
-                G=G,
-                df=df,
-            )
-            X = vectors_to_matrix(feature_vectors, account_list)
-            probs = model.predict(X)
-            ml_scores = {
-                acct: float(prob)
-                for acct, prob in zip(account_list, probs)
-            }
-            logger.info("ML scoring completed for %d accounts", len(ml_scores))
-        elif ML_ENABLED:
-            # Deployment fallback: bootstrap a lightweight logistic model from rule-based pseudo labels.
-            all_accounts = set(df["sender_id"].unique()) | set(
-                df["receiver_id"].unique()
-            )
-            feature_vectors, account_list = build_feature_vectors(
-                all_accounts=all_accounts,
-                cycle_accounts=cycle_accounts,
-                aggregators=aggregators,
-                dispersers=dispersers,
-                shell_accounts=shell_accounts,
-                high_velocity=high_velocity,
-                rapid_pass_through=rapid_pt_accounts,
-                activity_spike=spike_accounts,
-                high_centrality=centrality_accounts,
-                low_retention=retention_accounts,
-                high_throughput=throughput_accounts,
-                balance_oscillation=oscillation_accounts,
-                burst_diversity=diversity_accounts,
-                scc_members=scc_accounts,
-                cascade_depth=cascade_accounts,
-                irregular_activity=irregular_accounts,
-                high_closeness=closeness_accounts,
-                high_clustering=clustering_accounts,
-                rapid_forwarding=forwarding_accounts,
-                dormant_activation=dormant_accounts,
-                structured_fragmentation=structuring_accounts,
-                G=G,
-                df=df,
-            )
-            X = vectors_to_matrix(feature_vectors, account_list)
-            y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= 50.0 else 0 for a in account_list], dtype=np.int32)
-            if y.sum() == 0 or y.sum() == len(y):
-                # Ensure both classes exist for logistic fit.
-                cutoff = float(np.percentile([normalized.get(a, {}).get("score", 0.0) for a in account_list], 80)) if account_list else 50.0
-                y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= cutoff else 0 for a in account_list], dtype=np.int32)
-            try:
-                bootstrap_model = RiskModel()
-                bootstrap_model.train(X, y)
-                _cache_runtime_model(bootstrap_model)
-                probs = bootstrap_model.predict(X)
-                ml_scores = {
-                    acct: float(prob)
-                    for acct, prob in zip(account_list, probs)
-                }
-                logger.info("Bootstrapped runtime ML model for %d accounts", len(ml_scores))
-            except Exception as e:
-                logger.warning("Runtime ML bootstrap failed; keeping rule-only scoring: %s", e)
+            with log_timer("ml_feature_vector_building"):
+                feature_vectors, account_list = build_feature_vectors(
+                    all_accounts=all_accounts,
+                    cycle_accounts=cycle_accounts,
+                    aggregators=aggregators,
+                    dispersers=dispersers,
+                    shell_accounts=shell_accounts,
+                    high_velocity=high_velocity,
+                    rapid_pass_through=rapid_pt_accounts,
+                    activity_spike=spike_accounts,
+                    high_centrality=centrality_accounts,
+                    low_retention=retention_accounts,
+                    high_throughput=throughput_accounts,
+                    balance_oscillation=oscillation_accounts,
+                    burst_diversity=diversity_accounts,
+                    scc_members=scc_accounts,
+                    cascade_depth=cascade_accounts,
+                    irregular_activity=irregular_accounts,
+                    high_closeness=closeness_accounts,
+                    high_clustering=clustering_accounts,
+                    rapid_forwarding=forwarding_accounts,
+                    dormant_activation=dormant_accounts,
+                    structured_fragmentation=structuring_accounts,
+                    G=G,
+                    df=df,
+                )
+
+            if model and model.is_trained:
+                with log_timer("ml_inference_primary"):
+                    try:
+                        X = vectors_to_matrix(feature_vectors, account_list)
+                        probs = model.predict(X)
+                        ml_scores = {acct: float(prob) for acct, prob in zip(account_list, probs)}
+                    except Exception as e:
+                        logger.error("Primary ML inference failed: %s", str(e))
+            else:
+                # Optimized Bootstrap: only compute pseudo-labels once
+                with log_timer("ml_inference_bootstrap"):
+                    try:
+                        X = vectors_to_matrix(feature_vectors, account_list)
+                        y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= 50.0 else 0 for a in account_list], dtype=np.int32)
+                        
+                        if y.sum() == 0 or y.sum() == len(y):
+                            valid_scores = [normalized.get(a, {}).get("score", 0.0) for a in account_list]
+                            cutoff = float(np.percentile(valid_scores, 80)) if valid_scores else 50.0
+                            y = np.array([1 if normalized.get(a, {}).get("score", 0.0) >= cutoff else 0 for a in account_list], dtype=np.int32)
+                            
+                        bootstrap_model = RiskModel()
+                        bootstrap_model.train(X, y)
+                        _cache_runtime_model(bootstrap_model)
+                        probs = bootstrap_model.predict(X)
+                        ml_scores = {acct: float(prob) for acct, prob in zip(account_list, probs)}
+                    except Exception as e:
+                        logger.warning("ML bootstrap failed: %s", e)
 
         normalized = compute_hybrid_scores(normalized, ml_scores)
         _mark_stage("ml_hybrid_scoring")

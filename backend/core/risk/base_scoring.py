@@ -233,9 +233,10 @@ def compute_scores(
             if not has_high_confidence:
                 score *= 0.5  # Heavy penalize single weak pattern
             else:
-                score *= 0.9  # Mild smoothing for single strong pattern
+                # NO PENALTY for high-confidence motifs like Cycles/Shells/Smurfing
+                score *= 1.0  
         elif core_pattern_count >= 3:
-            score *= 1.2  # Stronger amplification for multiple signals
+            score *= 1.3  # Stronger amplification for multiple signals
 
         score = max(0.0, score)
 
@@ -248,7 +249,7 @@ def compute_scores(
             "rapid_forwarding", "deep_layered_cascade", "low_retention_pass_through",
             "high_throughput_ratio", "balance_oscillation_pass_through",
             "sudden_activity_spike", "dormant_activation_spike",
-            "structured_fragmentation",
+            "structured_fragmentation", "fan_in_participant", "fan_out_participant"
         }
         has_structural = bool(set(patterns) & _STRUCTURAL_EVIDENCE)
         if not has_structural:
